@@ -1,0 +1,788 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Reports & Newsletters — Sender</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            ink:   { DEFAULT: '#0f172a', muted: '#64748b', soft: '#94a3b8' },
+            brand: { 50: '#eef2ff', 100: '#e0e7ff', 500: '#6366f1', 600: '#4f46e5', 700: '#4338ca' },
+          },
+        },
+      },
+    };
+  </script>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif; background: #fafbfc; }
+    .pill { display: inline-flex; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; }
+    .pill-active, .pill-sent, .pill-delivered    { background: #d1fae5; color: #047857; }
+    .pill-scheduled                              { background: #dbeafe; color: #1e40af; }
+    .pill-sending, .pill-queued, .pill-paused    { background: #fef3c7; color: #92400e; }
+    .pill-failed, .pill-bounced, .pill-churned   { background: #fee2e2; color: #b91c1c; }
+    .pill-draft, .pill-neutral                   { background: #f1f5f9; color: #475569; }
+    .pill-newsletter                             { background: #e0e7ff; color: #4338ca; }
+    .pill-report                                 { background: #dbeafe; color: #1e40af; }
+    .nav-active { background: #f1f5f9; color: #0f172a; font-weight: 600; }
+    dialog::backdrop { background: rgba(15, 23, 42, 0.45); }
+    dialog { border: none; padding: 0; border-radius: 1rem; box-shadow: 0 20px 60px rgba(0,0,0,0.18); max-width: 90vw; }
+    .btn       { padding: 0.5rem 1rem; border-radius: .5rem; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid transparent; white-space: nowrap; }
+    .btn-pri   { background: #0f172a; color: white; }
+    .btn-pri:hover   { background: #1e293b; }
+    .btn-out   { background: white; color: #0f172a; border-color: #e2e8f0; }
+    .btn-out:hover   { background: #f8fafc; }
+    .btn-danger { background: #dc2626; color: white; }
+    .btn-danger:hover { background: #b91c1c; }
+    .btn-sm    { padding: 0.25rem 0.625rem; font-size: 12px; }
+    .field input, .field select, .field textarea { width: 100%; padding: 0.5rem 0.75rem; border: 1px solid #e2e8f0; border-radius: 0.5rem; font-size: 13px; font-family: inherit; }
+    .field input:focus, .field select:focus, .field textarea:focus { outline: none; border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,0.15); }
+    .field label { display: block; font-size: 11px; font-weight: 600; color: #64748b; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .toast { position: fixed; bottom: 20px; right: 20px; padding: 0.75rem 1rem; border-radius: 0.5rem; box-shadow: 0 8px 24px rgba(0,0,0,0.12); color: white; font-size: 13px; font-weight: 500; z-index: 1000; }
+    .toast-ok    { background: #059669; }
+    .toast-err   { background: #dc2626; }
+  </style>
+</head>
+<body class="text-ink">
+  <div class="flex h-screen overflow-hidden">
+    <!-- Sidebar -->
+    <aside class="w-60 shrink-0 border-r border-slate-200 bg-white flex flex-col">
+      <div class="h-14 flex items-center gap-2 px-5">
+        <div class="h-8 w-8 rounded-lg bg-ink text-white flex items-center justify-center text-sm font-bold">✉</div>
+        <div>
+          <div class="text-sm font-semibold leading-tight">Sender</div>
+          <div class="text-[10px] uppercase tracking-wider text-ink-soft">Reports &amp; Newsletters</div>
+        </div>
+      </div>
+      <nav id="nav" class="flex-1 overflow-y-auto px-3 py-2 text-sm"></nav>
+      <div class="border-t border-slate-200 p-3 text-[11px] text-ink-soft">
+        <div class="rounded-lg bg-slate-50 p-3">
+          <div class="font-medium text-ink text-xs">Sender service</div>
+          <div class="mt-0.5" id="status-dot">Loading…</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <main class="flex-1 overflow-y-auto">
+      <header class="sticky top-0 z-10 h-14 border-b border-slate-200 bg-white/80 backdrop-blur px-6 flex items-center">
+        <input class="w-96 h-9 px-3 rounded-lg border border-slate-200 bg-slate-50 text-sm placeholder:text-ink-soft focus:outline-none focus:ring-2 focus:ring-brand-500/20" placeholder="Search…" />
+      </header>
+
+      <section class="px-6 py-6 space-y-6" id="page"></section>
+    </main>
+  </div>
+
+  <!-- Generic modal — reused by every form -->
+  <dialog id="modal" class="w-[28rem]">
+    <form id="modal-form" class="bg-white">
+      <header class="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+        <h2 id="modal-title" class="text-base font-semibold">Title</h2>
+        <button type="button" id="modal-close" class="text-ink-soft hover:text-ink">✕</button>
+      </header>
+      <div id="modal-body" class="p-5 space-y-3 max-h-[60vh] overflow-y-auto"></div>
+      <footer class="px-5 py-3 border-t border-slate-100 flex justify-end gap-2">
+        <button type="button" class="btn btn-out" id="modal-cancel">Cancel</button>
+        <button type="submit" class="btn btn-pri" id="modal-submit">Save</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <script>
+    // ===========================================================================
+    // State
+    // ===========================================================================
+    const PAGES = [
+      { id: 'dashboard',       label: 'Dashboard' },
+      { id: 'monthly-reports', label: 'Monthly Reports' },
+      { id: 'newsletters',     label: 'Newsletters' },
+      { id: 'client-lists',    label: 'Client Lists' },
+      { id: 'templates',       label: 'Templates' },
+      { id: 'upload-csv',      label: 'Upload CSV' },
+      { id: 'send-queue',      label: 'Send Queue' },
+      { id: 'email-logs',      label: 'Email Logs' },
+      { id: 'settings',        label: 'Settings' },
+    ];
+
+    let view = location.hash.replace(/^#/, '') || 'dashboard';
+    let data = {
+      kpis: { activeClients: 0, emailsThisMonth: 0, failedSends: 0, scheduledCampaigns: 0 },
+      recipients: [], lists: [], listMembers: [], templates: [], batches: [], queue: [], logs: [], users: [],
+    };
+
+    // ===========================================================================
+    // Helpers
+    // ===========================================================================
+    const $ = sel => document.querySelector(sel);
+    const fmtNum = n => new Intl.NumberFormat('en-US').format(n ?? 0);
+
+    function esc(s) {
+      return String(s ?? '').replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+    }
+    function relTime(iso) {
+      if (!iso) return '—';
+      const d = new Date(iso);
+      const diff = Date.now() - d.getTime();
+      const min = Math.round(diff / 60000);
+      if (min < 1) return 'just now';
+      if (min < 60) return `${min}m ago`;
+      const hr = Math.round(min / 60);
+      if (hr < 24) return `${hr}h ago`;
+      const day = Math.round(hr / 24);
+      if (day < 7) return `${day}d ago`;
+      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    }
+    function fmtDateTime(iso) {
+      if (!iso) return '—';
+      return new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    }
+
+    function toast(msg, ok = true) {
+      const t = document.createElement('div');
+      t.className = `toast ${ok ? 'toast-ok' : 'toast-err'}`;
+      t.textContent = msg;
+      document.body.appendChild(t);
+      setTimeout(() => t.remove(), 3500);
+    }
+
+    async function api(method, path, body) {
+      const res = await fetch(`/api${path}`, {
+        method,
+        headers: body ? { 'Content-Type': 'application/json' } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+      return json;
+    }
+
+    async function refresh() {
+      try {
+        data = await fetch('/api/snapshot').then(r => r.json());
+        renderPage();
+      } catch (e) {
+        toast('Refresh failed: ' + e.message, false);
+      }
+    }
+
+    // ===========================================================================
+    // Modal
+    // ===========================================================================
+    const modal = $('#modal');
+    let modalSubmit = null;
+    $('#modal-close').onclick  = () => modal.close();
+    $('#modal-cancel').onclick = () => modal.close();
+    $('#modal-form').onsubmit  = async (e) => {
+      e.preventDefault();
+      if (!modalSubmit) return;
+      const fd = new FormData(e.target);
+      const obj = Object.fromEntries(fd.entries());
+      try {
+        await modalSubmit(obj);
+        modal.close();
+        await refresh();
+      } catch (err) {
+        toast(err.message, false);
+      }
+    };
+
+    function openModal({ title, fields, onSubmit, submitLabel = 'Save' }) {
+      $('#modal-title').textContent = title;
+      $('#modal-submit').textContent = submitLabel;
+      $('#modal-body').innerHTML = fields.map(f => {
+        const selected = Array.isArray(f.value) ? f.value : [];
+        return `
+        <div class="field">
+          <label>${esc(f.label)}${f.required ? ' *' : ''}</label>
+          ${f.type === 'textarea'
+            ? `<textarea name="${esc(f.name)}" rows="${f.rows || 6}" ${f.required ? 'required' : ''} placeholder="${esc(f.placeholder || '')}">${esc(f.value || '')}</textarea>`
+            : f.type === 'select'
+            ? `<select name="${esc(f.name)}" ${f.required ? 'required' : ''}>${(f.options || []).map(o => `<option value="${esc(o.value)}" ${o.value === f.value ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}</select>`
+            : f.type === 'checkboxes'
+            ? (f.options || []).length === 0
+              ? `<div class="text-xs text-ink-soft italic px-1">No options yet.</div>`
+              : `<div class="space-y-1.5 border border-slate-200 rounded-lg p-2 max-h-40 overflow-y-auto">
+                  ${(f.options || []).map(o => `<label class="flex items-center gap-2 text-sm cursor-pointer">
+                    <input type="checkbox" name="${esc(f.name)}" value="${esc(o.value)}" ${selected.includes(o.value) ? 'checked' : ''} />
+                    <span>${esc(o.label)}</span>
+                  </label>`).join('')}
+                </div>`
+            : `<input type="${f.type || 'text'}" name="${esc(f.name)}" value="${esc(f.value || '')}" ${f.required ? 'required' : ''} placeholder="${esc(f.placeholder || '')}" />`}
+          ${f.hint ? `<div class="mt-1 text-[11px] text-ink-soft">${esc(f.hint)}</div>` : ''}
+        </div>`;
+      }).join('');
+      modalSubmit = onSubmit;
+      modal.showModal();
+    }
+
+    // ===========================================================================
+    // Nav
+    // ===========================================================================
+    function renderNav() {
+      const nav = $('#nav');
+      nav.innerHTML = PAGES.map(p => `
+        <button data-id="${p.id}" class="w-full text-left px-3 py-2 rounded-lg mb-0.5 text-ink-muted hover:bg-slate-50 hover:text-ink ${view === p.id ? 'nav-active' : ''}">
+          ${p.label}
+        </button>`).join('');
+      nav.querySelectorAll('button').forEach(b => {
+        b.addEventListener('click', () => { view = b.dataset.id; location.hash = view; renderNav(); renderPage(); });
+      });
+    }
+    window.addEventListener('hashchange', () => { view = location.hash.replace(/^#/, '') || 'dashboard'; renderNav(); renderPage(); });
+
+    // ===========================================================================
+    // Page renderers
+    // ===========================================================================
+    function pageHeader(title, sub, action = '') {
+      return `<div class="flex items-end justify-between">
+        <div><h1 class="text-2xl font-semibold">${esc(title)}</h1>
+        <p class="mt-0.5 text-sm text-ink-muted">${esc(sub)}</p></div>${action}
+      </div>`;
+    }
+    function card(content, extra = '') {
+      return `<div class="rounded-2xl border border-slate-200 bg-white ${extra}">${content}</div>`;
+    }
+    function empty(title, desc, action = '') {
+      return `<div class="px-6 py-14 text-center">
+        <div class="mx-auto mb-3 h-12 w-12 rounded-full bg-slate-100 flex items-center justify-center text-ink-muted">📭</div>
+        <div class="text-sm font-semibold">${esc(title)}</div>
+        <div class="mt-1 text-sm text-ink-muted max-w-sm mx-auto">${esc(desc)}</div>
+        ${action ? `<div class="mt-4">${action}</div>` : ''}
+      </div>`;
+    }
+
+    // ── Dashboard ─────────────────────────────────────────────────────────
+    function renderDashboard() {
+      const k = data.kpis;
+      const kpiCard = (label, value) => `<div class="rounded-2xl border border-slate-200 bg-white p-5">
+        <div class="text-[11px] uppercase tracking-wide text-ink-soft font-semibold">${label}</div>
+        <div class="mt-3 text-2xl font-semibold tabular-nums">${fmtNum(value)}</div>
+      </div>`;
+      const recent = data.batches.slice(0, 5);
+      const upcoming = data.batches.filter(b => b.status === 'scheduled').slice(0, 5);
+      return `
+        ${pageHeader('Dashboard', 'Email operations overview.')}
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          ${kpiCard('Active clients', k.activeClients)}
+          ${kpiCard('Emails this month', k.emailsThisMonth)}
+          ${kpiCard('Failed sends', k.failedSends)}
+          ${kpiCard('Scheduled sends', k.scheduledCampaigns)}
+        </div>
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          ${card(`
+            <div class="p-5 pb-3 flex items-center justify-between border-b border-slate-100">
+              <div><h3 class="text-sm font-semibold">Recent sends</h3>
+              <p class="text-xs text-ink-soft">Last batches across newsletters and reports.</p></div>
+            </div>
+            ${recent.length === 0
+              ? empty('No sends yet', 'Newsletters and reports will appear here.')
+              : `<table class="w-full text-sm">
+                  <thead><tr class="text-left text-[11px] uppercase tracking-wide text-ink-soft border-b border-slate-100">
+                    <th class="px-5 py-2.5 font-medium">Name</th><th class="px-5 py-2.5 font-medium">Type</th>
+                    <th class="px-5 py-2.5 font-medium">Status</th><th class="px-5 py-2.5 font-medium text-right">Recipients</th>
+                  </tr></thead><tbody>
+                    ${recent.map(b => `<tr class="border-b border-slate-100 last:border-0">
+                      <td class="px-5 py-3 font-medium">${esc(b.name)}</td>
+                      <td class="px-5 py-3 text-ink-muted capitalize">${esc(b.type)}</td>
+                      <td class="px-5 py-3"><span class="pill pill-${esc(b.status)}">${esc(b.status)}</span></td>
+                      <td class="px-5 py-3 text-right tabular-nums text-ink-muted">${fmtNum(b.recipients_count)}</td>
+                    </tr>`).join('')}
+                  </tbody></table>`}`, 'lg:col-span-2')}
+          ${card(`
+            <div class="p-5 pb-3 border-b border-slate-100"><h3 class="text-sm font-semibold">Upcoming scheduled</h3></div>
+            ${upcoming.length === 0
+              ? empty('Nothing scheduled', 'Schedule a send and it shows up here.')
+              : `<ul class="p-3 space-y-1">${upcoming.map(b => `<li class="p-2.5 rounded-lg hover:bg-slate-50">
+                  <div class="text-sm font-medium">${esc(b.name)}</div>
+                  <div class="text-xs text-ink-soft mt-0.5">${fmtDateTime(b.scheduled_at)} · ${fmtNum(b.recipients_count)} recipients</div>
+                </li>`).join('')}</ul>`}`)}
+        </div>`;
+    }
+
+    // ── Batches (newsletters / reports) ───────────────────────────────────
+    function batchCard(b) {
+      const list = data.lists.find(l => l.id === b.audience_list_id);
+      const tpl  = data.templates.find(t => t.id === b.template_id);
+      return `<div class="rounded-2xl border border-slate-200 bg-white overflow-hidden hover:shadow-md transition-shadow">
+        <div class="h-2 bg-gradient-to-r from-brand-500 to-brand-700"></div>
+        <div class="p-5">
+          <div class="flex items-center justify-between mb-3">
+            <span class="pill pill-${esc(b.status)}">${esc(b.status)}</span>
+            <span class="text-[11px] text-ink-soft">${fmtNum(b.recipients_count)} recipients</span>
+          </div>
+          <div class="font-semibold">${esc(b.name)}</div>
+          <div class="text-xs text-ink-muted mt-1">${esc(list?.name || 'No list')} · ${esc(tpl?.name || 'No template')}</div>
+          ${b.scheduled_at ? `<div class="text-xs text-ink-muted mt-1">Scheduled ${fmtDateTime(b.scheduled_at)}</div>` : ''}
+          <div class="mt-4 flex gap-2">
+            ${b.status === 'draft' || b.status === 'scheduled' || b.status === 'failed'
+              ? `<button class="btn btn-pri btn-sm flex-1" onclick="sendBatch('${b.id}')">Send now</button>`
+              : ''}
+            <button class="btn btn-out btn-sm" onclick="editBatch('${b.id}')">Edit</button>
+            <button class="btn btn-out btn-sm" onclick="deleteBatch('${b.id}')">Delete</button>
+          </div>
+        </div>
+      </div>`;
+    }
+
+    function batchModal(type, existing = null) {
+      const isReport = type === 'report';
+      const templates = data.templates.filter(t => isReport ? t.type === 'report' : t.type === 'newsletter');
+      openModal({
+        title: existing ? `Edit ${isReport ? 'report' : 'newsletter'}` : `New ${isReport ? 'monthly report' : 'newsletter'}`,
+        fields: [
+          { name: 'name', label: 'Name', required: true, value: existing?.name, placeholder: 'May Newsletter — Personal Injury' },
+          { name: 'audience_list_id', label: 'Audience list', type: 'select', required: true, value: existing?.audience_list_id,
+            options: [{ value: '', label: '— pick a list —' }, ...data.lists.map(l => ({ value: l.id, label: l.name }))] },
+          { name: 'template_id', label: 'Template', type: 'select', required: true, value: existing?.template_id,
+            options: [{ value: '', label: '— pick a template —' }, ...templates.map(t => ({ value: t.id, label: t.name }))] },
+          { name: 'scheduled_at', label: 'Schedule for (optional)', type: 'datetime-local', value: existing?.scheduled_at ? new Date(existing.scheduled_at).toISOString().slice(0,16) : '' },
+        ],
+        onSubmit: async (form) => {
+          const payload = {
+            name: form.name,
+            type,
+            audience_list_id: form.audience_list_id || null,
+            template_id: form.template_id || null,
+            scheduled_at: form.scheduled_at ? new Date(form.scheduled_at).toISOString() : null,
+            status: form.scheduled_at ? 'scheduled' : 'draft',
+          };
+          if (existing) await api('PATCH', `/batches/${existing.id}`, payload);
+          else          await api('POST',  `/batches`, payload);
+          toast(existing ? 'Batch updated' : 'Batch created');
+        }
+      });
+    }
+
+    window.editBatch = id => {
+      const b = data.batches.find(x => x.id === id);
+      if (b) batchModal(b.type, b);
+    };
+    window.deleteBatch = async id => {
+      if (!confirm('Delete this batch?')) return;
+      try { await api('DELETE', `/batches/${id}`); toast('Deleted'); refresh(); }
+      catch (e) { toast(e.message, false); }
+    };
+    window.sendBatch = async id => {
+      if (!confirm('Send this batch now to all recipients in the audience list?')) return;
+      const btns = document.querySelectorAll('button');
+      btns.forEach(b => b.disabled = true);
+      try {
+        const r = await api('POST', `/batches/${id}/send`);
+        toast(`Sent ${r.delivered}/${r.attempted} (${r.failed} failed)`, r.failed === 0);
+        await refresh();
+      } catch (e) {
+        toast('Send failed: ' + e.message, false);
+      } finally {
+        btns.forEach(b => b.disabled = false);
+      }
+    };
+
+    function renderNewsletters() {
+      const items = data.batches.filter(b => b.type === 'newsletter');
+      const action = `<button class="btn btn-pri" onclick="batchModal('newsletter')">+ New newsletter</button>`;
+      return `
+        ${pageHeader('Newsletters', 'Recurring client newsletters by segment.', action)}
+        ${items.length === 0
+          ? card(empty('No newsletters yet', 'Create your first newsletter to send to a client segment.',
+              `<button class="btn btn-pri" onclick="batchModal('newsletter')">+ New newsletter</button>`))
+          : `<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">${items.map(batchCard).join('')}</div>`}`;
+    }
+
+    function renderMonthlyReports() {
+      const items = data.batches.filter(b => b.type === 'report');
+      const action = `<button class="btn btn-pri" onclick="batchModal('report')">+ New report</button>`;
+      return `
+        ${pageHeader('Monthly Reports', 'Personalized monthly performance reports.', action)}
+        ${items.length === 0
+          ? card(empty('No report sends yet', 'Create a monthly report batch from a template + client list.',
+              `<button class="btn btn-pri" onclick="batchModal('report')">+ New report</button>`))
+          : `<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">${items.map(batchCard).join('')}</div>`}`;
+    }
+
+    // ── Client Lists ─────────────────────────────────────────────────────
+    window.listModal = (existing = null) => {
+      openModal({
+        title: existing ? 'Edit list' : 'New client list',
+        fields: [
+          { name: 'name', label: 'Name', required: true, value: existing?.name, placeholder: "Luiza's Clients" },
+          { name: 'owner', label: 'Owner', value: existing?.owner, placeholder: 'Luiza Castro' },
+          { name: 'description', label: 'Description', type: 'textarea', rows: 2, value: existing?.description },
+        ],
+        onSubmit: async (form) => {
+          if (existing) await api('PATCH', `/lists/${existing.id}`, form);
+          else          await api('POST',  `/lists`, form);
+          toast(existing ? 'List updated' : 'List created');
+        }
+      });
+    };
+    window.deleteList = async id => {
+      if (!confirm('Delete this list? Members are unaffected.')) return;
+      try { await api('DELETE', `/lists/${id}`); toast('Deleted'); refresh(); }
+      catch (e) { toast(e.message, false); }
+    };
+
+    window.recipientModal = (existing = null) => {
+      // Lists the client is already in (for editing) or pre-check the active
+      // list (for creating from within a list view).
+      const currentMembership = existing
+        ? data.listMembers.filter(m => m.recipient_id === existing.id).map(m => m.list_id)
+        : (activeListId ? [activeListId] : []);
+
+      openModal({
+        title: existing ? 'Edit client' : 'New client',
+        fields: [
+          { name: 'name',  label: 'Name',  required: true, value: existing?.name },
+          { name: 'email', label: 'Email', required: true, type: 'email', value: existing?.email },
+          { name: 'firm',  label: 'Firm',  value: existing?.firm },
+          { name: 'account_manager', label: 'Account manager', value: existing?.account_manager },
+          { name: 'status', label: 'Status', type: 'select', value: existing?.status || 'active',
+            options: [{ value: 'active', label: 'Active' }, { value: 'paused', label: 'Paused' }, { value: 'churned', label: 'Churned' }] },
+          { name: 'tags', label: 'Tags (comma-separated)', value: (existing?.tags || []).join(', '),
+            hint: 'e.g. PI, Tier 1' },
+          {
+            name: 'list_ids', label: 'Lists', type: 'checkboxes',
+            options: data.lists.map(l => ({ value: l.id, label: l.name })),
+            value: currentMembership,
+            hint: data.lists.length === 0 ? 'No lists yet — create one from + New list.' : 'Tick every list this client should belong to.',
+          },
+        ],
+        onSubmit: async (form) => {
+          form.tags = String(form.tags || '').split(',').map(s => s.trim()).filter(Boolean);
+          // Checkbox group is collected manually — FormData gives us multiple
+          // entries with the same name; we serialize to an array here.
+          form.list_ids = Array.from(document.querySelectorAll('input[name="list_ids"]:checked')).map(el => el.value);
+          if (existing) await api('PATCH', `/recipients/${existing.id}`, form);
+          else          await api('POST',  `/recipients`, form);
+          toast(existing ? 'Client updated' : 'Client added');
+        }
+      });
+    };
+    window.deleteRecipient = async id => {
+      if (!confirm('Delete this client?')) return;
+      try { await api('DELETE', `/recipients/${id}`); toast('Deleted'); refresh(); }
+      catch (e) { toast(e.message, false); }
+    };
+
+    window.toggleMember = async (listId, recipientId, isMember) => {
+      try {
+        if (isMember) await api('DELETE', `/lists/${listId}/members/${recipientId}`);
+        else          await api('POST',   `/lists/${listId}/members`, { recipient_id: recipientId });
+        refresh();
+      } catch (e) { toast(e.message, false); }
+    };
+
+    // Special sentinel '__all' = "All clients" pseudo-list (show every client).
+    // Null = nothing picked yet; we default to '__all' on first render.
+    let activeListId = '__all';
+    window.selectList = id => { activeListId = id; renderPage(); };
+
+    function renderClientLists() {
+      if (!activeListId) activeListId = '__all';
+      const showingAll = activeListId === '__all';
+      const activeList = showingAll ? null : data.lists.find(l => l.id === activeListId);
+      const memberIds = showingAll
+        ? null   // no filter
+        : new Set(data.listMembers.filter(m => m.list_id === activeListId).map(m => m.recipient_id));
+
+      // Pre-compute which lists each client belongs to, for the "Lists" column.
+      const listsByRecipient = {};
+      const listNameById = Object.fromEntries(data.lists.map(l => [l.id, l.name]));
+      for (const m of data.listMembers) {
+        if (!listsByRecipient[m.recipient_id]) listsByRecipient[m.recipient_id] = [];
+        const name = listNameById[m.list_id];
+        if (name) listsByRecipient[m.recipient_id].push(name);
+      }
+
+      return `
+        ${pageHeader('Client Lists', 'Segment clients by account manager, tier, or practice area.',
+          `<div class="flex gap-2">
+            <button class="btn btn-out" onclick="recipientModal()">+ Add client</button>
+            <button class="btn btn-pri" onclick="listModal()">+ New list</button>
+          </div>`)}
+        <div class="grid grid-cols-1 lg:grid-cols-4 gap-4">
+          ${card(`
+            <div class="px-5 py-3 border-b border-slate-100 text-[11px] uppercase tracking-wide text-ink-soft font-semibold">Lists</div>
+            <div class="p-2 text-sm space-y-0.5">
+              <div class="flex justify-between items-center px-3 py-2 rounded-lg cursor-pointer ${showingAll ? 'nav-active' : 'hover:bg-slate-50'}" onclick="selectList('__all')">
+                <div><div>All clients</div>
+                  <div class="text-[11px] text-ink-soft">${data.recipients.length} total</div></div>
+              </div>
+              ${data.lists.length === 0
+                ? `<div class="px-3 py-3 text-xs text-ink-soft italic">No lists yet — click <strong>+ New list</strong>.</div>`
+                : data.lists.map(l => {
+                    const memberCount = data.listMembers.filter(m => m.list_id === l.id).length;
+                    return `<div class="group flex justify-between items-center px-3 py-2 rounded-lg cursor-pointer ${l.id === activeListId ? 'nav-active' : 'hover:bg-slate-50'}" onclick="selectList('${l.id}')">
+                      <div class="min-w-0">
+                        <div class="truncate">${esc(l.name)}</div>
+                        <div class="text-[11px] text-ink-soft truncate">${esc(l.owner || '—')} · ${memberCount} member${memberCount === 1 ? '' : 's'}</div>
+                      </div>
+                      <div class="hidden group-hover:flex gap-1 items-center">
+                        <button class="text-ink-soft hover:text-ink" onclick="event.stopPropagation(); listModal(${JSON.stringify(l).replace(/"/g,'&quot;')})">✎</button>
+                        <button class="text-rose-500 hover:text-rose-700" onclick="event.stopPropagation(); deleteList('${l.id}')">✕</button>
+                      </div>
+                    </div>`;
+                  }).join('')}
+            </div>`, 'lg:col-span-1')}
+          ${card(`
+            <div class="px-5 py-3 border-b border-slate-100 flex items-center justify-between">
+              <div>
+                <h3 class="text-sm font-semibold">${esc(activeList?.name || 'All clients')}</h3>
+                <p class="text-xs text-ink-soft">
+                  ${showingAll ? `${data.recipients.length} total` : `${memberIds.size} member${memberIds.size === 1 ? '' : 's'}`}
+                </p>
+              </div>
+            </div>
+            ${(() => {
+              const visible = showingAll ? data.recipients : data.recipients.filter(r => memberIds.has(r.id));
+              if (data.recipients.length === 0) {
+                return empty('No clients yet', 'Add a client or import from CSV (Upload CSV page).', `<button class="btn btn-pri btn-sm" onclick="recipientModal()">+ Add client</button>`);
+              }
+              if (visible.length === 0) {
+                return empty(`No clients in "${activeList?.name || 'this list'}" yet`,
+                  'Add an existing client to this list by editing them, or create a new client with this list pre-selected.',
+                  `<button class="btn btn-pri btn-sm" onclick="recipientModal()">+ Add client to ${esc(activeList?.name || 'list')}</button>`);
+              }
+              return `<table class="w-full text-sm">
+                <thead><tr class="text-left text-[11px] uppercase tracking-wide text-ink-soft border-b border-slate-100">
+                  <th class="px-5 py-2.5 font-medium">Client</th>
+                  <th class="px-5 py-2.5 font-medium">Firm</th>
+                  <th class="px-5 py-2.5 font-medium">Manager</th>
+                  <th class="px-5 py-2.5 font-medium">Status</th>
+                  <th class="px-5 py-2.5 font-medium">Lists</th>
+                  <th class="px-5 py-2.5 font-medium">Last emailed</th>
+                  <th class="w-24 px-5 py-2.5"></th>
+                </tr></thead><tbody>
+                  ${visible.map(c => {
+                    const myLists = listsByRecipient[c.id] || [];
+                    return `<tr class="border-b border-slate-100 last:border-0">
+                      <td class="px-5 py-3.5"><div class="font-medium">${esc(c.name)}</div><div class="text-xs text-ink-soft">${esc(c.email)}</div></td>
+                      <td class="px-5 py-3.5 text-ink-muted">${esc(c.firm || '—')}</td>
+                      <td class="px-5 py-3.5 text-ink-muted">${esc(c.account_manager || '—')}</td>
+                      <td class="px-5 py-3.5"><span class="pill pill-${esc(c.status)}">${esc(c.status)}</span></td>
+                      <td class="px-5 py-3.5">
+                        ${myLists.length === 0
+                          ? '<span class="text-xs text-ink-soft">—</span>'
+                          : `<div class="flex flex-wrap gap-1">${myLists.map(n => `<span class="pill pill-neutral">${esc(n)}</span>`).join('')}</div>`}
+                      </td>
+                      <td class="px-5 py-3.5 text-ink-muted">${c.last_emailed_at ? relTime(c.last_emailed_at) : 'never'}</td>
+                      <td class="px-5 py-3.5 text-right whitespace-nowrap">
+                        ${!showingAll ? `<button class="text-ink-soft hover:text-ink mr-2" title="Remove from this list" onclick="removeFromList('${activeListId}', '${c.id}')">↩</button>` : ''}
+                        <button class="text-ink-soft hover:text-ink" title="Edit client" onclick="recipientModal(${JSON.stringify(c).replace(/"/g,'&quot;')})">✎</button>
+                        <button class="text-rose-500 hover:text-rose-700 ml-1" title="Delete client" onclick="deleteRecipient('${c.id}')">✕</button>
+                      </td>
+                    </tr>`;
+                  }).join('')}
+                </tbody></table>`;
+            })()}`, 'lg:col-span-3')}
+        </div>`;
+    }
+
+    window.removeFromList = async (listId, recipientId) => {
+      if (!confirm('Remove this client from the list? (The client itself is not deleted.)')) return;
+      try {
+        await api('DELETE', `/lists/${listId}/members/${recipientId}`);
+        toast('Removed from list');
+        refresh();
+      } catch (e) { toast(e.message, false); }
+    };
+
+    // ── Templates ─────────────────────────────────────────────────────────
+    window.templateModal = (existing = null) => {
+      openModal({
+        title: existing ? 'Edit template' : 'New template',
+        fields: [
+          { name: 'name', label: 'Name', required: true, value: existing?.name, placeholder: 'Monthly Report — Default' },
+          { name: 'type', label: 'Type', type: 'select', required: true, value: existing?.type,
+            options: [{ value: 'newsletter', label: 'Newsletter' }, { value: 'report', label: 'Monthly Report' }] },
+          { name: 'subject', label: 'Subject', value: existing?.subject, placeholder: 'Your April performance report' },
+          { name: 'body_html', label: 'Body (HTML)', type: 'textarea', rows: 10, value: existing?.body_html,
+            placeholder: '<p>Hi {{name}}, here is your monthly report…</p>',
+            hint: 'Merge variables: {{name}} {{email}} {{firm}} {{account_manager}}' },
+        ],
+        onSubmit: async (form) => {
+          if (existing) await api('PATCH', `/templates/${existing.id}`, form);
+          else          await api('POST',  `/templates`, form);
+          toast(existing ? 'Template updated' : 'Template created');
+        }
+      });
+    };
+    window.deleteTemplate = async id => {
+      if (!confirm('Delete this template?')) return;
+      try { await api('DELETE', `/templates/${id}`); toast('Deleted'); refresh(); }
+      catch (e) { toast(e.message, false); }
+    };
+
+    function renderTemplates() {
+      const action = `<button class="btn btn-pri" onclick="templateModal()">+ New template</button>`;
+      return `
+        ${pageHeader('Templates', 'Reusable email designs with merge variables.', action)}
+        ${data.templates.length === 0
+          ? card(empty('No templates yet', 'Save a reusable design for newsletters or monthly reports.',
+              `<button class="btn btn-pri" onclick="templateModal()">+ New template</button>`))
+          : `<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            ${data.templates.map(t => `<div class="rounded-2xl border border-slate-200 bg-white overflow-hidden">
+              <div class="h-32 ${esc(t.thumb_color || 'bg-slate-100')} flex items-center justify-center">
+                <span class="rounded-lg bg-white/80 px-3 py-1.5 text-xs font-medium shadow">${t.type === 'newsletter' ? '✉️ Newsletter' : '📊 Report'}</span>
+              </div>
+              <div class="p-5">
+                <h3 class="text-sm font-semibold truncate">${esc(t.name)}</h3>
+                <p class="text-xs text-ink-soft mt-0.5">Updated ${relTime(t.updated_at)}</p>
+                <div class="mt-3"><span class="pill pill-${esc(t.type)}">${esc(t.type)}</span></div>
+                <div class="mt-4 flex gap-2">
+                  <button class="btn btn-out btn-sm flex-1" onclick="templateModal(${JSON.stringify(t).replace(/"/g,'&quot;')})">Edit</button>
+                  <button class="btn btn-out btn-sm" onclick="deleteTemplate('${t.id}')">Delete</button>
+                </div>
+              </div>
+            </div>`).join('')}
+          </div>`}`;
+    }
+
+    // ── Upload CSV ───────────────────────────────────────────────────────
+    function renderUploadCsv() {
+      return `
+        ${pageHeader('Upload CSV', 'Bulk-import or update clients from a CSV file.')}
+        ${card(`
+          <div class="p-5">
+            <div class="rounded-xl border-2 border-dashed border-slate-200 bg-slate-50/50 p-10 text-center">
+              <div class="mx-auto mb-3 h-12 w-12 rounded-full bg-white shadow flex items-center justify-center text-lg">⬆</div>
+              <div class="text-sm font-medium">Drop a CSV here or click to browse</div>
+              <div class="mt-1 text-xs text-ink-muted">Required columns: <code class="px-1.5 py-0.5 rounded bg-slate-100">name</code>
+                <code class="px-1.5 py-0.5 rounded bg-slate-100">email</code> · optional: firm, account_manager, status, tags</div>
+              <input id="csv-input" type="file" accept=".csv,text/csv" class="mt-4 mx-auto block text-sm" />
+              <div id="csv-result" class="mt-4 text-sm"></div>
+            </div>
+          </div>
+        `)}`;
+    }
+
+    function wireCsv() {
+      const inp = $('#csv-input');
+      if (!inp) return;
+      inp.onchange = async () => {
+        const f = inp.files?.[0];
+        if (!f) return;
+        $('#csv-result').textContent = 'Uploading…';
+        try {
+          const csv = await f.text();
+          const r = await api('POST', '/recipients/import', { csv });
+          $('#csv-result').innerHTML = `<span class="text-emerald-700">✓ Imported ${r.imported} clients.</span>`;
+          toast(`Imported ${r.imported} clients`);
+          await refresh();
+        } catch (e) {
+          $('#csv-result').innerHTML = `<span class="text-rose-700">✕ ${esc(e.message)}</span>`;
+          toast(e.message, false);
+        }
+      };
+    }
+
+    // ── Send Queue ────────────────────────────────────────────────────────
+    function renderSendQueue() {
+      const count = s => data.queue.filter(q => q.status === s).length;
+      return `
+        ${pageHeader('Send Queue', 'Live status of outgoing emails.')}
+        <div class="grid grid-cols-1 sm:grid-cols-4 gap-4">
+          ${['queued','sending','delivered','failed'].map(s => `
+            <div class="rounded-2xl border border-slate-200 bg-white p-5">
+              <div class="text-[11px] uppercase tracking-wide text-ink-soft font-semibold">${s}</div>
+              <div class="mt-2 text-2xl font-semibold tabular-nums">${count(s)}</div>
+            </div>`).join('')}
+        </div>
+        ${card(data.queue.length === 0
+          ? empty('Queue is empty', 'Sends will appear here in real time once a batch starts.')
+          : `<table class="w-full text-sm">
+            <thead><tr class="text-left text-[11px] uppercase tracking-wide text-ink-soft border-b border-slate-100">
+              <th class="px-5 py-2.5 font-medium">Recipient</th><th class="px-5 py-2.5 font-medium">Status</th>
+              <th class="px-5 py-2.5 font-medium text-right">Retries</th><th class="px-5 py-2.5 font-medium">Sent</th>
+            </tr></thead><tbody>
+              ${data.queue.map(q => `<tr class="border-b border-slate-100 last:border-0">
+                <td class="px-5 py-3.5 font-medium">${esc(q.recipient_email)}</td>
+                <td class="px-5 py-3.5"><span class="pill pill-${esc(q.status)}">${esc(q.status)}</span></td>
+                <td class="px-5 py-3.5 text-right tabular-nums text-ink-muted">${q.retries}</td>
+                <td class="px-5 py-3.5 text-ink-muted">${q.sent_at ? relTime(q.sent_at) : '—'}</td>
+              </tr>`).join('')}
+            </tbody></table>`)}`;
+    }
+
+    // ── Email Logs ────────────────────────────────────────────────────────
+    function renderEmailLogs() {
+      return `
+        ${pageHeader('Email Logs', 'Timeline of every email event.')}
+        ${card(data.logs.length === 0
+          ? empty('No events yet', 'Sent, opened, clicked, and bounced events will appear here.')
+          : `<ul class="p-3 divide-y divide-slate-100">
+            ${data.logs.map(l => `<li class="flex items-start gap-3 py-2.5 first:pt-0 last:pb-0">
+              <span class="pill pill-${esc(l.type)} mt-0.5">${esc(l.type)}</span>
+              <div class="flex-1">
+                <div class="text-sm">${esc(l.recipient_email || '—')}</div>
+                ${l.meta ? `<div class="text-xs text-ink-soft truncate">${esc(l.meta)}</div>` : ''}
+              </div>
+              <div class="text-xs text-ink-soft whitespace-nowrap">${relTime(l.occurred_at)}</div>
+            </li>`).join('')}
+          </ul>`)}`;
+    }
+
+    // ── Settings ──────────────────────────────────────────────────────────
+    function renderSettings() {
+      return `
+        ${pageHeader('Settings', 'Users with access.')}
+        ${card(`
+          <div class="px-5 py-3 border-b border-slate-100">
+            <h3 class="text-sm font-semibold">Team members</h3>
+            <p class="text-xs text-ink-soft">${data.users.length} total</p>
+          </div>
+          ${data.users.length === 0
+            ? empty('No users yet', 'OS users will appear here once they sign in.')
+            : `<ul class="p-3 divide-y divide-slate-100">
+              ${data.users.map(u => `<li class="flex items-center justify-between py-3 first:pt-0 last:pb-0">
+                <div>
+                  <div class="text-sm font-medium">${esc(u.full_name || '—')}</div>
+                  <div class="text-xs text-ink-soft">${esc(u.email)}</div>
+                </div>
+                <span class="pill pill-neutral">${esc(u.role)}</span>
+              </li>`).join('')}
+            </ul>`}
+        `)}`;
+    }
+
+    function renderPage() {
+      const map = {
+        'dashboard':       renderDashboard,
+        'newsletters':     renderNewsletters,
+        'monthly-reports': renderMonthlyReports,
+        'client-lists':    renderClientLists,
+        'templates':       renderTemplates,
+        'upload-csv':      renderUploadCsv,
+        'send-queue':      renderSendQueue,
+        'email-logs':      renderEmailLogs,
+        'settings':        renderSettings,
+      };
+      $('#page').innerHTML = (map[view] || renderDashboard)();
+      if (view === 'upload-csv') wireCsv();
+    }
+
+    // ===========================================================================
+    // Boot
+    // ===========================================================================
+    async function load() {
+      $('#status-dot').textContent = 'Connecting…';
+      try {
+        const r = await fetch('/api/snapshot');
+        const json = await r.json();
+        if (!r.ok) throw new Error(json.error || `HTTP ${r.status}`);
+        data = json;
+        $('#status-dot').innerHTML = '<span class="text-emerald-600">● Connected</span>';
+      } catch (e) {
+        $('#status-dot').innerHTML = `<span class="text-rose-600">● ${esc(e.message)}</span>`;
+      }
+      renderPage();
+    }
+
+    renderNav();
+    renderPage();
+    load();
+  </script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "name": "sender-app",
+  "version": "0.1.0",
+  "description": "Reports & Newsletters Sender — standalone Node.js app for Constellation OS.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.46.1",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1"
+  }
+}
