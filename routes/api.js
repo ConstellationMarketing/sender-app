@@ -309,6 +309,11 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
   if (qErr) return bad(res, 500, qErr.message);
 
   let delivered = 0, failed = 0;
+  // Track per-recipient failures so the UI can show the actual Mailgun error
+  // instead of just a "N failed" count. Without this, debugging required
+  // opening Email Logs and reading each row by hand.
+  const failures = [];
+
   for (const qi of queued) {
     const recipient = recipients.find(r => r.id === qi.recipient_id) || {};
     const mergeRow = {
@@ -337,14 +342,16 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
         .eq('id', recipient.id);
     } catch (err) {
       failed++;
+      const reason = String(err.message || err).slice(0, 500);
+      failures.push({ email: recipient.email, reason });
       await sb.from('sender_sends_emails').update({
         status: 'failed',
-        error_message: String(err.message || err).slice(0, 500),
+        error_message: reason,
       }).eq('id', qi.id);
       await sb.from('sender_logs_events').insert({
         send_email_id: qi.id, batch_id: batch.id,
         type: 'failed', recipient_email: recipient.email,
-        meta: String(err.message || err).slice(0, 500),
+        meta: reason,
       });
     }
   }
@@ -360,6 +367,7 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
     attempted: recipients.length,
     delivered,
     failed,
+    failures,                                          // [{ email, reason }, …]
   });
 }));
 

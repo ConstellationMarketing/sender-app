@@ -144,8 +144,14 @@
       const t = document.createElement('div');
       t.className = `toast ${ok ? 'toast-ok' : 'toast-err'}`;
       t.textContent = msg;
+      // Click to dismiss — useful when an error toast is long and the user
+      // wants to clear it before the timer.
+      t.style.cursor = 'pointer';
+      t.addEventListener('click', () => t.remove());
       document.body.appendChild(t);
-      setTimeout(() => t.remove(), 3500);
+      // Errors stay up 3x longer so the user can actually read the Mailgun
+      // failure reason. Success toasts stay quick to avoid being noisy.
+      setTimeout(() => t.remove(), ok ? 3500 : 10000);
     }
 
     async function api(method, path, body) {
@@ -371,7 +377,28 @@
       btns.forEach(b => b.disabled = true);
       try {
         const r = await api('POST', `/batches/${id}/send`);
-        toast(`Sent ${r.delivered}/${r.attempted} (${r.failed} failed)`, r.failed === 0);
+        if (r.failed === 0) {
+          toast(`Sent ${r.delivered}/${r.attempted}`, true);
+        } else {
+          // Show the FIRST failure reason inline so the user knows what's wrong
+          // without having to dig through Email Logs. Mailgun's most common
+          // reasons (suppression, bounce, unsubscribe, domain not verified)
+          // are descriptive enough to act on immediately.
+          const first = Array.isArray(r.failures) && r.failures.length
+            ? r.failures[0]
+            : null;
+          const headline = `Sent ${r.delivered}/${r.attempted} — ${r.failed} failed`;
+          const detail   = first
+            ? ` · first failure (${first.email}): ${first.reason}`
+            : ' · open Email Logs for details';
+          toast(headline + detail, false);
+
+          if (Array.isArray(r.failures) && r.failures.length > 1) {
+            // Print the full list to the JS console so it can be copied
+            // without truncation — the toast only fits the first one.
+            console.warn('[sender] batch send failures:', r.failures);
+          }
+        }
         await refresh();
       } catch (e) {
         toast('Send failed: ' + e.message, false);

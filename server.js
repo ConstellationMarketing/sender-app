@@ -32,6 +32,14 @@ app.use((req, res, next) => {
   next();
 });
 
+// /healthz — convenience alias for the wiki, which documents this URL.
+// The full env-var snapshot lives at /api/health; /healthz just confirms
+// the Node process + Express stack are alive so an external uptime monitor
+// can ping it cheaply without touching Supabase.
+app.get('/healthz', (_req, res) => {
+  res.json({ ok: true, service: 'sender', ts: Date.now() });
+});
+
 // API
 app.use('/api', apiRouter);
 
