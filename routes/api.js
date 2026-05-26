@@ -124,8 +124,34 @@ router.patch('/recipients/:id', wrap(async (req, res) => {
 
 router.delete('/recipients/:id', wrap(async (req, res) => {
   const sb = getSupabase();
-  const { error } = await sb.from('sender_clients_recipients').delete().eq('id', req.params.id);
-  if (error) return bad(res, 400, error.message);
+  const id = req.params.id;
+  // Cascade: remove referenced rows first or the DELETE fails with a foreign-
+  // key violation. The schema doesn't have ON DELETE CASCADE on these FKs,
+  // so we walk the tree manually:
+  //   sender_logs_events  ← references sender_sends_emails.id (via send_email_id)
+  //   sender_sends_emails ← references sender_clients_recipients.id (via recipient_id)
+  //   sender_clients_list_members ← references sender_clients_recipients.id
+
+  // 1. Find every send-email row this recipient is on, so we can delete
+  //    its log events first. Two-step to avoid Supabase nested-delete quirks.
+  const { data: sendRows } = await sb
+    .from('sender_sends_emails')
+    .select('id')
+    .eq('recipient_id', id);
+  const sendIds = (sendRows || []).map(r => r.id);
+  if (sendIds.length) {
+    await sb.from('sender_logs_events').delete().in('send_email_id', sendIds);
+  }
+
+  // 2. Now safe to delete the send-email rows themselves.
+  await sb.from('sender_sends_emails').delete().eq('recipient_id', id);
+
+  // 3. Remove from every list this recipient was a member of.
+  await sb.from('sender_clients_list_members').delete().eq('recipient_id', id);
+
+  // 4. Finally, the recipient itself.
+  const { error } = await sb.from('sender_clients_recipients').delete().eq('id', id);
+  if (error) return bad(res, 400, `Could not delete recipient: ${error.message}`);
   res.json({ ok: true });
 }));
 
@@ -183,8 +209,16 @@ router.patch('/lists/:id', wrap(async (req, res) => {
 
 router.delete('/lists/:id', wrap(async (req, res) => {
   const sb = getSupabase();
-  const { error } = await sb.from('sender_clients_lists').delete().eq('id', req.params.id);
-  if (error) return bad(res, 400, error.message);
+  const id = req.params.id;
+  // Cascade — same reason as recipient delete. A list is referenced by
+  // sender_clients_list_members (membership) and sender_sends_batches
+  // (audience). We blow away memberships, then null-out the FK on batches
+  // (rather than deleting batches — they contain historical send data we
+  // want to keep even after the list itself is gone), then drop the list.
+  await sb.from('sender_clients_list_members').delete().eq('list_id', id);
+  await sb.from('sender_sends_batches').update({ audience_list_id: null }).eq('audience_list_id', id);
+  const { error } = await sb.from('sender_clients_lists').delete().eq('id', id);
+  if (error) return bad(res, 400, `Could not delete list: ${error.message}`);
   res.json({ ok: true });
 }));
 
@@ -233,8 +267,13 @@ router.patch('/templates/:id', wrap(async (req, res) => {
 
 router.delete('/templates/:id', wrap(async (req, res) => {
   const sb = getSupabase();
-  const { error } = await sb.from('sender_templates_emails').delete().eq('id', req.params.id);
-  if (error) return bad(res, 400, error.message);
+  const id = req.params.id;
+  // Cascade — templates are referenced by sender_sends_batches.template_id.
+  // Null it out on those batches rather than deleting them so historical send
+  // records (delivered/opened/clicked stats) survive the template's removal.
+  await sb.from('sender_sends_batches').update({ template_id: null }).eq('template_id', id);
+  const { error } = await sb.from('sender_templates_emails').delete().eq('id', id);
+  if (error) return bad(res, 400, `Could not delete template: ${error.message}`);
   res.json({ ok: true });
 }));
 
@@ -260,8 +299,14 @@ router.patch('/batches/:id', wrap(async (req, res) => {
 
 router.delete('/batches/:id', wrap(async (req, res) => {
   const sb = getSupabase();
-  const { error } = await sb.from('sender_sends_batches').delete().eq('id', req.params.id);
-  if (error) return bad(res, 400, error.message);
+  const id = req.params.id;
+  // Cascade — a batch owns per-recipient send rows in sender_sends_emails,
+  // which in turn link to log events in sender_logs_events. Delete in the
+  // right order or the FK violation blocks everything.
+  await sb.from('sender_logs_events').delete().eq('batch_id', id);
+  await sb.from('sender_sends_emails').delete().eq('batch_id', id);
+  const { error } = await sb.from('sender_sends_batches').delete().eq('id', id);
+  if (error) return bad(res, 400, `Could not delete batch: ${error.message}`);
   res.json({ ok: true });
 }));
 
