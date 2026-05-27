@@ -316,6 +316,98 @@ router.delete('/batches/:id', wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// ─── TEST-SEND a batch (preview to your own email) ─────────────────────────
+// Sends the batch's template to a single test email instead of the audience
+// list. Useful for verifying merge variables / formatting / Mailgun delivery
+// before doing the real bulk send. Does NOT touch sender_sends_emails,
+// sender_logs_events, or the batch's status — it's a dry-run side-channel.
+// Body: { to: "your@email.com", sample_recipient_id?: "<uuid>" }
+//   - `to` is the email that receives the test (required)
+//   - `sample_recipient_id` (optional) — pull merge vars from this real
+//     recipient instead of using "Test Recipient" placeholders
+router.post('/batches/:id/test-send', wrap(async (req, res) => {
+  const sb = getSupabase();
+  ensureMailgun();
+
+  const toEmail = String(req.body?.to || '').trim();
+  if (!toEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(toEmail)) {
+    return bad(res, 400, 'A valid `to` email is required for the test send');
+  }
+  const sampleRecipientId = req.body?.sample_recipient_id || null;
+
+  const { data: batch, error: batchErr } = await sb
+    .from('sender_sends_batches').select('*').eq('id', req.params.id).single();
+  if (batchErr || !batch)      return bad(res, 404, batchErr?.message || 'Batch not found');
+  if (!batch.template_id)      return bad(res, 400, 'Batch has no template — assign one first');
+
+  const { data: tpl, error: tplErr } = await sb
+    .from('sender_templates_emails').select('*').eq('id', batch.template_id).single();
+  if (tplErr || !tpl) return bad(res, 400, 'Template not found');
+
+  // Pull merge-variable values from a sample recipient if one was given,
+  // OR from the first recipient on the audience list if available, OR
+  // fall back to clearly-labeled placeholders so the test obviously isn't
+  // pretending to be a real client.
+  let mergeRow = {
+    name:            'Test Recipient',
+    client_name:     'Test Recipient',
+    email:           toEmail,
+    firm:            'Test Firm LLP',
+    account_manager: 'Test Manager',
+  };
+  if (sampleRecipientId) {
+    const { data: sample } = await sb
+      .from('sender_clients_recipients')
+      .select('name, email, firm, account_manager')
+      .eq('id', sampleRecipientId)
+      .single();
+    if (sample) {
+      mergeRow = {
+        name: sample.name, client_name: sample.name,
+        email: toEmail,  // we still send to the test address, not the real one
+        firm: sample.firm, account_manager: sample.account_manager,
+      };
+    }
+  } else if (batch.audience_list_id) {
+    // Grab the first active member of the audience list so the test email
+    // shows what a real send to that list would look like.
+    const { data: members } = await sb
+      .from('sender_clients_list_members')
+      .select('recipient:sender_clients_recipients(name, email, firm, account_manager, status)')
+      .eq('list_id', batch.audience_list_id)
+      .limit(5);
+    const sample = (members || []).map(m => m.recipient).find(r => r && r.status === 'active' || r && r.status === 'live' || r && r.status === 'onboarding');
+    if (sample) {
+      mergeRow = {
+        name: sample.name, client_name: sample.name,
+        email: toEmail,
+        firm: sample.firm, account_manager: sample.account_manager,
+      };
+    }
+  }
+
+  const subjectBase = tpl.subject || batch.name || 'Test send';
+  const subject     = `[TEST] ${applyMergeVars(subjectBase, mergeRow)}`;
+  const html        = `
+    <div style="background:#fef3c7;border-left:4px solid #f59e0b;padding:12px 16px;margin:0 0 16px;font:14px/1.5 -apple-system,BlinkMacSystemFont,sans-serif;color:#92400e;">
+      <strong>⚠️ This is a TEST send.</strong> Real audience list was NOT contacted. Merge variables filled from <em>${esc(mergeRow.name)}</em>.
+    </div>
+    ${applyMergeVars(tpl.body_html || '', mergeRow)}
+  `;
+
+  try {
+    const result = await sendOne({ to: toEmail, subject, html });
+    return res.json({
+      ok: true,
+      to: toEmail,
+      mergedFrom: mergeRow.name,
+      mailgun: result,
+    });
+  } catch (e) {
+    return bad(res, 502, `Test send failed: ${e.message || e}`);
+  }
+}));
+
 // ─── SEND a batch ──────────────────────────────────────────────────────────
 router.post('/batches/:id/send', wrap(async (req, res) => {
   const sb = getSupabase();

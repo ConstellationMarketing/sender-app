@@ -351,10 +351,15 @@
           <div class="font-semibold">${esc(b.name)}</div>
           <div class="text-xs text-ink-muted mt-1">${esc(list?.name || 'No list')} · ${esc(tpl?.name || 'No template')}</div>
           ${b.scheduled_at ? `<div class="text-xs text-ink-muted mt-1">Scheduled ${fmtDateTime(b.scheduled_at)}</div>` : ''}
-          <div class="mt-4 flex gap-2">
+          <div class="mt-4 flex gap-2 flex-wrap">
             ${b.status === 'draft' || b.status === 'scheduled' || b.status === 'failed'
               ? `<button class="btn btn-pri btn-sm flex-1" onclick="sendBatch('${b.id}')">Send now</button>`
               : ''}
+            <!-- 🧪 Test = dry-run send to your own email. Doesn't touch
+                 the batch's status or the audience list at all. Always
+                 available (even on already-sent batches) so the team can
+                 preview a template's render after edits. -->
+            <button class="btn btn-out btn-sm" title="Send a test copy to your own email — does not contact the audience list" onclick="testSendBatch('${b.id}')">🧪 Test</button>
             <button class="btn btn-out btn-sm" onclick="editBatch('${b.id}')">Edit</button>
             <button class="btn btn-out btn-sm" onclick="deleteBatch('${b.id}')">Delete</button>
           </div>
@@ -399,6 +404,35 @@
       if (!confirm('Delete this batch?')) return;
       try { await api('DELETE', `/batches/${id}`); toast('Deleted'); refresh(); }
       catch (e) { toast(e.message, false); }
+    };
+
+    // 🧪 Test send — prompts for an email (defaults to the address the user
+    // tested with last time, persisted in localStorage). Hits the backend's
+    // /batches/:id/test-send which renders the template with merge vars
+    // pulled from a real sample recipient on the audience list (if any),
+    // prepends a yellow "[TEST]" warning banner, and sends to ONLY the
+    // address the user gave. The real audience list isn't touched.
+    const TEST_EMAIL_KEY = 'sender-test-email';
+    window.testSendBatch = async id => {
+      const prior = localStorage.getItem(TEST_EMAIL_KEY) || '';
+      const to = prompt(
+        'Test-send this batch to which email?\n\nThis is a dry-run — the real audience list will NOT be contacted. ' +
+        'The template renders with merge variables pulled from the first active client on the list.',
+        prior
+      );
+      if (!to) return;                       // user hit cancel
+      const trimmed = to.trim();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
+        toast('That doesn\'t look like a valid email.', false);
+        return;
+      }
+      localStorage.setItem(TEST_EMAIL_KEY, trimmed);
+      try {
+        const r = await api('POST', `/batches/${id}/test-send`, { to: trimmed });
+        toast(`✓ Test sent to ${trimmed}${r.mergedFrom ? ` (using ${r.mergedFrom}'s merge vars)` : ''}`, true);
+      } catch (e) {
+        toast('Test send failed: ' + e.message, false);
+      }
     };
     window.sendBatch = async id => {
       if (!confirm('Send this batch now to all recipients in the audience list?')) return;
@@ -610,44 +644,53 @@
               // when viewing the Rotating List — that's the list the client
               // belonged to before the user moved them here).
               const listsById = Object.fromEntries(data.lists.map(l => [l.id, l]));
-              return `<table class="w-full text-sm">
-                <thead><tr class="text-left text-[11px] uppercase tracking-wide text-ink-soft border-b border-slate-100">
-                  <th class="px-5 py-2.5 font-medium">Client</th>
-                  <th class="px-5 py-2.5 font-medium">Firm</th>
-                  <th class="px-5 py-2.5 font-medium">Email</th>
-                  <th class="px-5 py-2.5 font-medium">Status</th>
-                  ${isRotatingList
-                    ? `<th class="px-5 py-2.5 font-medium">Originally in</th>`
-                    : `<th class="px-5 py-2.5 font-medium">Lists</th>`}
-                  <th class="px-5 py-2.5 font-medium">Last emailed</th>
-                  <th class="w-32 px-5 py-2.5"></th>
-                </tr></thead><tbody>
-                  ${visible.map(c => {
-                    const myLists = listsByRecipient[c.id] || [];
-                    const originalList = c.original_list_id ? listsById[c.original_list_id] : null;
-                    // Client column now shows just the name (email lives in
-                    // its own column). Manager column dropped — the assignee
-                    // information already drives which list a client is in,
-                    // showing it again per-row was redundant clutter.
-                    return `<tr class="border-b border-slate-100 last:border-0">
-                      <td class="px-5 py-3.5 font-medium">${esc(c.name)}</td>
-                      <td class="px-5 py-3.5 text-ink-muted">${esc(c.firm || '—')}</td>
-                      <td class="px-5 py-3.5 text-ink-muted"><a href="mailto:${esc(c.email)}" class="hover:underline">${esc(c.email)}</a></td>
-                      <td class="px-5 py-3.5"><span class="pill pill-${esc(c.status)}">${esc(c.status)}</span></td>
-                      ${isRotatingList
-                        ? `<td class="px-5 py-3.5">${originalList ? `<span class="pill pill-neutral">${esc(originalList.name)}</span>` : '<span class="text-xs text-ink-soft">—</span>'}</td>`
-                        : `<td class="px-5 py-3.5">${myLists.length === 0 ? '<span class="text-xs text-ink-soft">—</span>' : `<div class="flex flex-wrap gap-1">${myLists.map(n => `<span class="pill pill-neutral">${esc(n)}</span>`).join('')}</div>`}</td>`}
-                      <td class="px-5 py-3.5 text-ink-muted">${c.last_emailed_at ? relTime(c.last_emailed_at) : 'never'}</td>
-                      <td class="px-5 py-3.5 text-right whitespace-nowrap">
+              // overflow-x-auto on the wrapper keeps the table from getting
+              // cropped on narrow screens (action column was getting cut off
+              // when Firm rows had long descriptions). Column widths are now
+              // fixed and explicit so the layout doesn't shift between lists.
+              // Firm cell is truncated with a tooltip — many of these are
+              // multi-sentence descriptions in the CRM, which was wrecking
+              // row height.
+              return `<div class="overflow-x-auto">
+                <table class="w-full text-sm" style="min-width: 960px;">
+                  <thead><tr class="text-left text-[11px] uppercase tracking-wide text-ink-soft border-b border-slate-100 bg-slate-50/50">
+                    <th class="px-4 py-3 font-medium" style="width: 22%;">Client</th>
+                    <th class="px-4 py-3 font-medium" style="width: 22%;">Firm</th>
+                    <th class="px-4 py-3 font-medium" style="width: 22%;">Email</th>
+                    <th class="px-4 py-3 font-medium" style="width: 90px;">Status</th>
+                    ${isRotatingList
+                      ? `<th class="px-4 py-3 font-medium">Originally in</th>`
+                      : `<th class="px-4 py-3 font-medium">Lists</th>`}
+                    <th class="px-4 py-3 font-medium" style="width: 110px;">Last emailed</th>
+                    <th class="px-4 py-3" style="width: 130px;"></th>
+                  </tr></thead><tbody>
+                    ${visible.map(c => {
+                      const myLists = listsByRecipient[c.id] || [];
+                      const originalList = c.original_list_id ? listsById[c.original_list_id] : null;
+                      return `<tr class="border-b border-slate-100 last:border-0 hover:bg-slate-50/50">
+                        <td class="px-4 py-3 font-medium align-top">${esc(c.name)}</td>
+                        <td class="px-4 py-3 text-ink-muted align-top">
+                          <div class="truncate" title="${esc(c.firm || '')}" style="max-width: 200px;">${esc(c.firm || '—')}</div>
+                        </td>
+                        <td class="px-4 py-3 text-ink-muted align-top">
+                          <a href="mailto:${esc(c.email)}" class="hover:underline truncate inline-block" style="max-width: 200px;" title="${esc(c.email)}">${esc(c.email)}</a>
+                        </td>
+                        <td class="px-4 py-3 align-top"><span class="pill pill-${esc(c.status)}">${esc(c.status)}</span></td>
                         ${isRotatingList
-                          ? `<button class="btn btn-out btn-sm" title="Move back to original list" onclick="moveBackToOriginal('${c.id}')">↩ Move back</button>`
-                          : (!showingAll
-                              ? `<button class="btn btn-out btn-sm" title="Move to Rotating List" onclick="moveToRotating('${c.id}')">🔁 Rotate</button>`
-                              : '')}
-                      </td>
-                    </tr>`;
-                  }).join('')}
-                </tbody></table>`;
+                          ? `<td class="px-4 py-3 align-top">${originalList ? `<span class="pill pill-neutral">${esc(originalList.name)}</span>` : '<span class="text-xs text-ink-soft">—</span>'}</td>`
+                          : `<td class="px-4 py-3 align-top">${myLists.length === 0 ? '<span class="text-xs text-ink-soft">—</span>' : `<div class="flex flex-wrap gap-1">${myLists.map(n => `<span class="pill pill-neutral">${esc(n)}</span>`).join('')}</div>`}</td>`}
+                        <td class="px-4 py-3 text-ink-muted text-xs align-top">${c.last_emailed_at ? relTime(c.last_emailed_at) : 'never'}</td>
+                        <td class="px-4 py-3 text-right whitespace-nowrap align-top">
+                          ${isRotatingList
+                            ? `<button class="btn btn-out btn-sm" title="Move back to original list" onclick="moveBackToOriginal('${c.id}')">↩ Move back</button>`
+                            : (!showingAll
+                                ? `<button class="btn btn-out btn-sm" title="Move to Rotating List" onclick="moveToRotating('${c.id}')">🔁 Rotate</button>`
+                                : '')}
+                        </td>
+                      </tr>`;
+                    }).join('')}
+                  </tbody></table>
+              </div>`;
             })()}`, 'lg:col-span-3')}
         </div>`;
     }
