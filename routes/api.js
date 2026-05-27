@@ -288,7 +288,7 @@ router.delete('/templates/:id', wrap(async (req, res) => {
 // ─── Batches (newsletter / report sends) ───────────────────────────────────
 router.post('/batches', wrap(async (req, res) => {
   const sb = getSupabase();
-  const row = clean(req.body || {}, ['name','type','audience_list_id','template_id','status','scheduled_at','owner']);
+  const row = clean(req.body || {}, ['name','type','audience_list_id','template_id','status','scheduled_at','owner','ad_hoc_recipients']);
   if (!row.name) return bad(res, 400, 'name is required');
   if (!row.type) return bad(res, 400, 'type is required (newsletter | report | broadcast)');
   row.status = row.status || 'draft';
@@ -299,7 +299,7 @@ router.post('/batches', wrap(async (req, res) => {
 
 router.patch('/batches/:id', wrap(async (req, res) => {
   const sb = getSupabase();
-  const row = clean(req.body || {}, ['name','type','audience_list_id','template_id','status','scheduled_at','owner']);
+  const row = clean(req.body || {}, ['name','type','audience_list_id','template_id','status','scheduled_at','owner','ad_hoc_recipients']);
   const { data, error } = await sb.from('sender_sends_batches').update(row).eq('id', req.params.id).select().single();
   if (error) return bad(res, 400, error.message);
   res.json(data);
@@ -441,40 +441,75 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
     .from('sender_sends_batches').select('*').eq('id', req.params.id).single();
   if (batchErr || !batch) return bad(res, 404, batchErr?.message || 'Batch not found');
 
-  if (!batch.template_id)      return bad(res, 400, 'Batch has no template');
-  if (!batch.audience_list_id) return bad(res, 400, 'Batch has no audience list');
+  if (!batch.template_id) return bad(res, 400, 'Batch has no template');
+  if (!batch.audience_list_id && !batch.ad_hoc_recipients) {
+    return bad(res, 400, 'Batch has no audience list and no ad-hoc recipients');
+  }
 
   const { data: tpl, error: tplErr } = await sb
     .from('sender_templates_emails').select('*').eq('id', batch.template_id).single();
   if (tplErr || !tpl) return bad(res, 400, 'Template not found');
 
-  const { data: members, error: memErr } = await sb
-    .from('sender_clients_list_members')
-    .select('recipient:sender_clients_recipients(*)')
-    .eq('list_id', batch.audience_list_id);
-  if (memErr) return bad(res, 400, memErr.message);
+  // Build the recipient list. Two paths:
+  //  1. Ad-hoc recipients (typed into the batch modal for beta-testing) take
+  //     priority. We synthesize lightweight in-memory rows — no DB writes
+  //     for fake "clients", they don't show up in the Client Lists view.
+  //  2. Saved audience list — read the members and filter by sendable status.
+  let recipients = [];
+  if (batch.ad_hoc_recipients && String(batch.ad_hoc_recipients).trim()) {
+    const matches = String(batch.ad_hoc_recipients).match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || [];
+    const seen = new Set();
+    const adHocEmails = matches.map(x => x.trim()).filter(x => {
+      const k = x.toLowerCase();
+      if (seen.has(k)) return false;
+      seen.add(k); return true;
+    });
+    recipients = adHocEmails.map(addr => ({
+      id:              null,                 // synthetic — no DB row
+      name:            addr.split('@')[0],
+      email:           addr,
+      firm:            'Test Firm',
+      account_manager: 'Test Manager',
+      status:          'active',
+      _adHoc:          true,
+    }));
+    if (!recipients.length) return bad(res, 400, 'Ad-hoc recipients field had no parseable email addresses');
+  } else {
+    const { data: members, error: memErr } = await sb
+      .from('sender_clients_list_members')
+      .select('recipient:sender_clients_recipients(*)')
+      .eq('list_id', batch.audience_list_id);
+    if (memErr) return bad(res, 400, memErr.message);
 
-  // Statuses we'll actually send to. Was just 'active' — now includes
-  // 'onboarding' and 'live' because the ClickUp CRM uses both, and the
-  // monthly reports need to reach onboarding clients too.
-  const SENDABLE_STATUSES = new Set(['active', 'onboarding', 'live']);
-  const recipients = (members || [])
-    .map(m => m.recipient)
-    .filter(r => r && r.email && SENDABLE_STATUSES.has(String(r.status || '').toLowerCase()));
+    // Statuses we'll actually send to. Was just 'active' — now includes
+    // 'onboarding' and 'live' because the ClickUp CRM uses both, and the
+    // monthly reports need to reach onboarding clients too.
+    const SENDABLE_STATUSES = new Set(['active', 'onboarding', 'live']);
+    recipients = (members || [])
+      .map(m => m.recipient)
+      .filter(r => r && r.email && SENDABLE_STATUSES.has(String(r.status || '').toLowerCase()));
 
-  if (!recipients.length) return bad(res, 400, 'No sendable recipients in this list (statuses checked: active / onboarding / live)');
+    if (!recipients.length) return bad(res, 400, 'No sendable recipients in this list (statuses checked: active / onboarding / live)');
+  }
 
   await sb.from('sender_sends_batches').update({
     status: 'sending',
     recipients_count: recipients.length,
   }).eq('id', batch.id);
 
-  const queueRows = recipients.map(r => ({
-    batch_id: batch.id,
-    recipient_id: r.id,
-    recipient_email: r.email,
-    status: 'queued',
-  }));
+  // For ad-hoc batches, recipient_id will be null on every row. We OMIT
+  // the property rather than send null explicitly so Postgres uses its
+  // column default — works whether the FK column is nullable or not, as
+  // long as the DB migration to drop NOT NULL has been run.
+  const queueRows = recipients.map(r => {
+    const qr = {
+      batch_id: batch.id,
+      recipient_email: r.email,
+      status: 'queued',
+    };
+    if (r.id) qr.recipient_id = r.id;
+    return qr;
+  });
   const { data: queued, error: qErr } = await sb
     .from('sender_sends_emails').insert(queueRows).select();
   if (qErr) return bad(res, 500, qErr.message);
@@ -503,7 +538,9 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
   };
 
   for (const qi of queued) {
-    const recipient = recipients.find(r => r.id === qi.recipient_id) || {};
+    // Match by email — works for both real (id) and ad-hoc (id=null) rows,
+    // since ad-hoc batches can have many recipients sharing the same null id.
+    const recipient = recipients.find(r => r.email === qi.recipient_email) || {};
     const addresses = splitEmails(recipient.email);
     if (!addresses.length) {
       // No valid email parsed — surface as a failure for this queue row.
@@ -556,9 +593,13 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
         status: 'delivered',
         sent_at: new Date().toISOString(),
       }).eq('id', qi.id);
-      await sb.from('sender_clients_recipients')
-        .update({ last_emailed_at: new Date().toISOString() })
-        .eq('id', recipient.id);
+      // Only stamp the recipient's last_emailed_at if this is a real saved
+      // client (ad-hoc test rows have id=null and aren't in the DB).
+      if (recipient.id) {
+        await sb.from('sender_clients_recipients')
+          .update({ last_emailed_at: new Date().toISOString() })
+          .eq('id', recipient.id);
+      }
     } else {
       failed++;
       await sb.from('sender_sends_emails').update({

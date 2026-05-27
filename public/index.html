@@ -376,17 +376,29 @@
         title: existing ? `Edit ${isReport ? 'report' : 'newsletter'}` : `New ${isReport ? 'monthly report' : 'newsletter'}`,
         fields: [
           { name: 'name', label: 'Name', required: true, value: existing?.name, placeholder: 'May Newsletter — Personal Injury' },
-          { name: 'audience_list_id', label: 'Audience list', type: 'select', required: true, value: existing?.audience_list_id,
-            options: [{ value: '', label: '— pick a list —' }, ...data.lists.map(l => ({ value: l.id, label: l.name }))] },
+          // Either pick a saved audience list OR type ad-hoc emails below.
+          // At least one must be filled; the backend send loop honors
+          // ad_hoc_recipients first if present, otherwise uses the list.
+          { name: 'audience_list_id', label: 'Audience list', type: 'select', value: existing?.audience_list_id,
+            options: [{ value: '', label: '— pick a list (or leave blank and type recipients below) —' }, ...data.lists.map(l => ({ value: l.id, label: l.name }))] },
+          { name: 'ad_hoc_recipients', label: 'Or type recipients (for testing)', type: 'textarea', rows: 3,
+            value: existing?.ad_hoc_recipients || '',
+            placeholder: 'omar@goconstellation.com, luiza@goconstellation.com',
+            hint: 'Comma, space, or newline separated. Leave blank if you picked a list above.' },
           { name: 'template_id', label: 'Template', type: 'select', required: true, value: existing?.template_id,
             options: [{ value: '', label: '— pick a template —' }, ...templates.map(t => ({ value: t.id, label: t.name }))] },
           { name: 'scheduled_at', label: 'Schedule for (optional)', type: 'datetime-local', value: existing?.scheduled_at ? new Date(existing.scheduled_at).toISOString().slice(0,16) : '' },
         ],
         onSubmit: async (form) => {
+          const adHoc = String(form.ad_hoc_recipients || '').trim();
+          if (!form.audience_list_id && !adHoc) {
+            throw new Error('Pick an audience list or type at least one recipient email.');
+          }
           const payload = {
             name: form.name,
             type,
             audience_list_id: form.audience_list_id || null,
+            ad_hoc_recipients: adHoc || null,
             template_id: form.template_id || null,
             scheduled_at: form.scheduled_at ? new Date(form.scheduled_at).toISOString() : null,
             status: form.scheduled_at ? 'scheduled' : 'draft',
@@ -709,7 +721,7 @@
                       const emails = splitEmails(c.email);
                       return `<tr class="border-b border-slate-100 last:border-0 hover:bg-slate-50/50">
                         <td class="px-3 py-3 font-medium align-top">
-                          <div class="truncate" title="${esc(c.name)}">${esc(c.name)}</div>
+                          <div class="break-words" title="${esc(c.name)}">${esc(c.name)}</div>
                         </td>
                         <td class="px-3 py-3 text-ink-muted align-top">
                           ${emails.length === 0
