@@ -644,20 +644,23 @@
               // when viewing the Rotating List — that's the list the client
               // belonged to before the user moved them here).
               const listsById = Object.fromEntries(data.lists.map(l => [l.id, l]));
-              // overflow-x-auto on the wrapper keeps the table from getting
-              // cropped on narrow screens (action column was getting cut off
-              // when Firm rows had long descriptions). Column widths are now
-              // fixed and explicit so the layout doesn't shift between lists.
-              // Firm cell is truncated with a tooltip — many of these are
-              // multi-sentence descriptions in the CRM, which was wrecking
-              // row height.
+              // Firm column dropped — the firm name was redundant with the
+              // Client column on most rows (the ClickUp task name IS the
+              // firm) and the column got wrecked when the CRM had long
+              // descriptive Firm fields. The freed space goes to Email,
+              // which now stacks one address per line when a client has
+              // multiple contacts (split on comma / semicolon / newline).
+              const splitEmails = (s) => String(s || '')
+                .split(/[,;\n]/)
+                .map(x => x.trim())
+                .filter(Boolean);
+
               return `<div class="overflow-x-auto">
-                <table class="w-full text-sm" style="min-width: 960px;">
+                <table class="w-full text-sm" style="min-width: 880px;">
                   <thead><tr class="text-left text-[11px] uppercase tracking-wide text-ink-soft border-b border-slate-100 bg-slate-50/50">
-                    <th class="px-4 py-3 font-medium" style="width: 22%;">Client</th>
-                    <th class="px-4 py-3 font-medium" style="width: 22%;">Firm</th>
-                    <th class="px-4 py-3 font-medium" style="width: 22%;">Email</th>
-                    <th class="px-4 py-3 font-medium" style="width: 90px;">Status</th>
+                    <th class="px-4 py-3 font-medium" style="width: 28%;">Client</th>
+                    <th class="px-4 py-3 font-medium" style="width: 30%;">Emails</th>
+                    <th class="px-4 py-3 font-medium" style="width: 100px;">Status</th>
                     ${isRotatingList
                       ? `<th class="px-4 py-3 font-medium">Originally in</th>`
                       : `<th class="px-4 py-3 font-medium">Lists</th>`}
@@ -667,13 +670,13 @@
                     ${visible.map(c => {
                       const myLists = listsByRecipient[c.id] || [];
                       const originalList = c.original_list_id ? listsById[c.original_list_id] : null;
+                      const emails = splitEmails(c.email);
                       return `<tr class="border-b border-slate-100 last:border-0 hover:bg-slate-50/50">
                         <td class="px-4 py-3 font-medium align-top">${esc(c.name)}</td>
                         <td class="px-4 py-3 text-ink-muted align-top">
-                          <div class="truncate" title="${esc(c.firm || '')}" style="max-width: 200px;">${esc(c.firm || '—')}</div>
-                        </td>
-                        <td class="px-4 py-3 text-ink-muted align-top">
-                          <a href="mailto:${esc(c.email)}" class="hover:underline truncate inline-block" style="max-width: 200px;" title="${esc(c.email)}">${esc(c.email)}</a>
+                          ${emails.length === 0
+                            ? '<span class="text-xs text-ink-soft">—</span>'
+                            : `<div class="space-y-1">${emails.map(e => `<a href="mailto:${esc(e)}" class="hover:underline block truncate" style="max-width: 280px;" title="${esc(e)}">${esc(e)}</a>`).join('')}</div>`}
                         </td>
                         <td class="px-4 py-3 align-top"><span class="pill pill-${esc(c.status)}">${esc(c.status)}</span></td>
                         ${isRotatingList

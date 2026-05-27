@@ -64,7 +64,9 @@ router.get('/snapshot', wrap(async (_req, res) => {
     sb.from('sender_sends_emails').select('*').order('created_at', { ascending: false }).limit(200),
     sb.from('sender_logs_events').select('*').order('occurred_at', { ascending: false }).limit(200),
     sb.from('users_profiles').select('id, full_name, email, role').order('full_name', { ascending: true, nullsFirst: false }),
-    sb.from('sender_clients_recipients').select('id', { count: 'exact', head: true }).eq('status', 'active'),
+    // KPI counts everyone who could plausibly receive an email — same set
+    // the send loop uses (active / onboarding / live). Was just 'active'.
+    sb.from('sender_clients_recipients').select('id', { count: 'exact', head: true }).in('status', ['active', 'onboarding', 'live']),
     sb.from('sender_sends_emails').select('id', { count: 'exact', head: true }).eq('status', 'delivered').gte('sent_at', monthStart.toISOString()),
     sb.from('sender_sends_emails').select('id', { count: 'exact', head: true }).eq('status', 'failed').gte('created_at', monthStart.toISOString()),
     sb.from('sender_sends_batches').select('id', { count: 'exact', head: true }).eq('status', 'scheduled'),
@@ -430,11 +432,15 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
     .eq('list_id', batch.audience_list_id);
   if (memErr) return bad(res, 400, memErr.message);
 
+  // Statuses we'll actually send to. Was just 'active' — now includes
+  // 'onboarding' and 'live' because the ClickUp CRM uses both, and the
+  // monthly reports need to reach onboarding clients too.
+  const SENDABLE_STATUSES = new Set(['active', 'onboarding', 'live']);
   const recipients = (members || [])
     .map(m => m.recipient)
-    .filter(r => r && r.email && r.status === 'active');
+    .filter(r => r && r.email && SENDABLE_STATUSES.has(String(r.status || '').toLowerCase()));
 
-  if (!recipients.length) return bad(res, 400, 'No active recipients in this list');
+  if (!recipients.length) return bad(res, 400, 'No sendable recipients in this list (statuses checked: active / onboarding / live)');
 
   await sb.from('sender_sends_batches').update({
     status: 'sending',
@@ -457,45 +463,78 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
   // opening Email Logs and reading each row by hand.
   const failures = [];
 
+  // ClickUp's CRM sometimes stores multiple emails in a single field
+  // (comma/semicolon-separated, e.g. "steve@x.com, allicia@x.com"). Split
+  // and send one Mailgun call per address — otherwise Mailgun rejects the
+  // whole row with "from parameter is not a valid address."
+  const splitEmails = (s) => String(s || '')
+    .split(/[,;\n]/)
+    .map(x => x.trim())
+    .filter(x => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(x));
+
   for (const qi of queued) {
     const recipient = recipients.find(r => r.id === qi.recipient_id) || {};
+    const addresses = splitEmails(recipient.email);
+    if (!addresses.length) {
+      // No valid email parsed — surface as a failure for this queue row.
+      failed++;
+      failures.push({ email: recipient.email || '(empty)', reason: 'No valid email address could be parsed from this row' });
+      await sb.from('sender_sends_emails').update({
+        status: 'failed',
+        error_message: 'No valid email parsed',
+      }).eq('id', qi.id);
+      continue;
+    }
+
     const mergeRow = {
       name: recipient.name,
       client_name: recipient.name,
-      email: recipient.email,
+      email: addresses[0],          // for {{email}} merge var — use the first one
       firm: recipient.firm,
       account_manager: recipient.account_manager,
     };
     const subject = applyMergeVars(tpl.subject || batch.name, mergeRow);
     const html    = applyMergeVars(tpl.body_html, mergeRow);
 
-    try {
-      await sendOne({ to: recipient.email, subject, html });
+    // Send to each parsed address. We count this queue row as "delivered"
+    // if at least one of its addresses succeeded — Mailgun-side stats are
+    // tracked per-address via the logs_events rows below.
+    let anyOk    = false;
+    let lastErr  = null;
+    for (const addr of addresses) {
+      try {
+        await sendOne({ to: addr, subject, html });
+        anyOk = true;
+        await sb.from('sender_logs_events').insert({
+          send_email_id: qi.id, batch_id: batch.id,
+          type: 'sent', recipient_email: addr,
+        });
+      } catch (err) {
+        lastErr = String(err.message || err).slice(0, 500);
+        failures.push({ email: addr, reason: lastErr });
+        await sb.from('sender_logs_events').insert({
+          send_email_id: qi.id, batch_id: batch.id,
+          type: 'failed', recipient_email: addr,
+          meta: lastErr,
+        });
+      }
+    }
+
+    if (anyOk) {
       delivered++;
       await sb.from('sender_sends_emails').update({
         status: 'delivered',
         sent_at: new Date().toISOString(),
       }).eq('id', qi.id);
-      await sb.from('sender_logs_events').insert({
-        send_email_id: qi.id, batch_id: batch.id,
-        type: 'sent', recipient_email: recipient.email,
-      });
       await sb.from('sender_clients_recipients')
         .update({ last_emailed_at: new Date().toISOString() })
         .eq('id', recipient.id);
-    } catch (err) {
+    } else {
       failed++;
-      const reason = String(err.message || err).slice(0, 500);
-      failures.push({ email: recipient.email, reason });
       await sb.from('sender_sends_emails').update({
         status: 'failed',
-        error_message: reason,
+        error_message: lastErr || 'All addresses failed',
       }).eq('id', qi.id);
-      await sb.from('sender_logs_events').insert({
-        send_email_id: qi.id, batch_id: batch.id,
-        type: 'failed', recipient_email: recipient.email,
-        meta: reason,
-      });
     }
   }
 
