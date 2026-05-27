@@ -20,9 +20,9 @@
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif; background: #fafbfc; }
     .pill { display: inline-flex; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; }
-    .pill-active, .pill-sent, .pill-delivered    { background: #d1fae5; color: #047857; }
+    .pill-active, .pill-sent, .pill-delivered, .pill-live { background: #d1fae5; color: #047857; }
     .pill-scheduled                              { background: #dbeafe; color: #1e40af; }
-    .pill-sending, .pill-queued, .pill-paused    { background: #fef3c7; color: #92400e; }
+    .pill-sending, .pill-queued, .pill-paused, .pill-onboarding { background: #fef3c7; color: #92400e; }
     .pill-failed, .pill-bounced, .pill-churned   { background: #fee2e2; color: #b91c1c; }
     .pill-draft, .pill-neutral                   { background: #f1f5f9; color: #475569; }
     .pill-newsletter                             { background: #e0e7ff; color: #4338ca; }
@@ -614,7 +614,7 @@
                 <thead><tr class="text-left text-[11px] uppercase tracking-wide text-ink-soft border-b border-slate-100">
                   <th class="px-5 py-2.5 font-medium">Client</th>
                   <th class="px-5 py-2.5 font-medium">Firm</th>
-                  <th class="px-5 py-2.5 font-medium">Manager</th>
+                  <th class="px-5 py-2.5 font-medium">Email</th>
                   <th class="px-5 py-2.5 font-medium">Status</th>
                   ${isRotatingList
                     ? `<th class="px-5 py-2.5 font-medium">Originally in</th>`
@@ -625,10 +625,14 @@
                   ${visible.map(c => {
                     const myLists = listsByRecipient[c.id] || [];
                     const originalList = c.original_list_id ? listsById[c.original_list_id] : null;
+                    // Client column now shows just the name (email lives in
+                    // its own column). Manager column dropped — the assignee
+                    // information already drives which list a client is in,
+                    // showing it again per-row was redundant clutter.
                     return `<tr class="border-b border-slate-100 last:border-0">
-                      <td class="px-5 py-3.5"><div class="font-medium">${esc(c.name)}</div><div class="text-xs text-ink-soft">${esc(c.email)}</div></td>
+                      <td class="px-5 py-3.5 font-medium">${esc(c.name)}</td>
                       <td class="px-5 py-3.5 text-ink-muted">${esc(c.firm || '—')}</td>
-                      <td class="px-5 py-3.5 text-ink-muted">${esc(c.account_manager || '—')}</td>
+                      <td class="px-5 py-3.5 text-ink-muted"><a href="mailto:${esc(c.email)}" class="hover:underline">${esc(c.email)}</a></td>
                       <td class="px-5 py-3.5"><span class="pill pill-${esc(c.status)}">${esc(c.status)}</span></td>
                       ${isRotatingList
                         ? `<td class="px-5 py-3.5">${originalList ? `<span class="pill pill-neutral">${esc(originalList.name)}</span>` : '<span class="text-xs text-ink-soft">—</span>'}</td>`

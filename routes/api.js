@@ -515,7 +515,9 @@ router.post('/clients-sync', wrap(async (_req, res) => {
       email:           c.email,
       firm:            c.firm || null,
       account_manager: accountManagerName || null,
-      status:          'active',
+      // Preserve the real ClickUp status — was hardcoded to 'active' before,
+      // which masked Onboarding clients in the UI (they all looked Active).
+      status:          c.status || 'active',
     };
     const { data: upserted, error: upErr } = await sb
       .from('sender_clients_recipients')
