@@ -1,100 +1,114 @@
 #!/usr/bin/env node
 'use strict';
 
-// One-off diagnostic. Lists tasks in the ClickUp "Client Information" list
-// and prints anything whose name OR custom fields contain "scrofano". Also
-// includes archived (trashed) tasks so we can tell whether the Scrofano
-// Client Information task was deleted or moved.
+// Diagnostic for the Scrofano Law PC "Client Information" 404. Three passes:
+//   1. Hit /view/{id} directly with the embed's view_id from the URL —
+//      ClickUp returns the embed's target settings, which tells us which
+//      task the view is pointing at.
+//   2. Walk every space → every folder → every list in the team and find
+//      the "Scrofano Law PC" folder + its lists.
+//   3. List tasks in each Scrofano sublist (live + archived) so we can see
+//      whether a "client information" task exists there or was deleted.
 //
-// Run on the VPS (CLICKUP_API_KEY already in env):
+// Run on the VPS:
+//   export CLICKUP_API_KEY=$(grep -E '^CLICKUP_API_KEY=' /opt/sender-app/.env | cut -d= -f2-)
 //   node scripts/find-scrofano.js
-// Or anywhere with the key:
-//   CLICKUP_API_KEY=pk_... node scripts/find-scrofano.js
-//
-// Bumps the page size to include archived rows because the OS CRM sync only
-// pulls non-archived ones — that's why the deleted task didn't show up in
-// the Sender's client list either.
 
 const CLICKUP_BASE = 'https://api.clickup.com/api/v2';
-const LIST_ID      = process.env.CRM_CLICKUP_LIST_ID || '901703957188';
-const NEEDLE       = (process.argv[2] || 'scrofano').toLowerCase();
+const TEAM_ID      = '2368165';                       // from the broken URL
+const VIEW_ID      = '288n5-244897';                  // the embed's view_id
 
 function getKey() {
   const k = process.env.CLICKUP_API_KEY;
-  if (!k) {
-    console.error('CLICKUP_API_KEY not set. On the VPS, do:');
-    console.error('  set -a; source /opt/sender-app/.env; set +a; node scripts/find-scrofano.js');
-    process.exit(2);
-  }
+  if (!k) { console.error('CLICKUP_API_KEY not set'); process.exit(2); }
   return k;
 }
 
-async function cuFetch(path) {
+async function cu(path) {
   const r = await fetch(`${CLICKUP_BASE}${path}`, {
     headers: { Authorization: getKey(), Accept: 'application/json' },
   });
   const text = await r.text();
   let json = null;
   try { json = text ? JSON.parse(text) : null; } catch {}
-  if (!r.ok) throw new Error(`ClickUp ${r.status} ${path}: ${(json && (json.err || json.error)) || text}`);
+  if (!r.ok) {
+    const err = new Error(`ClickUp ${r.status} ${path}: ${(json && (json.err || json.error)) || text}`);
+    err.status = r.status;
+    err.body   = json;
+    throw err;
+  }
   return json;
 }
 
-function matches(t) {
-  const name = String(t?.name || '').toLowerCase();
-  if (name.includes(NEEDLE)) return true;
-  for (const f of (t.custom_fields || [])) {
-    const v = f.value;
-    if (typeof v === 'string' && v.toLowerCase().includes(NEEDLE)) return true;
-    if (v && typeof v === 'object') {
-      const flat = JSON.stringify(v).toLowerCase();
-      if (flat.includes(NEEDLE)) return true;
+(async () => {
+  // ───────────────────────────────────────────────────────────────────────
+  // 1. View → embedded task target
+  // ───────────────────────────────────────────────────────────────────────
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log(`STEP 1: probe the embed view ${VIEW_ID}`);
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  try {
+    const v = await cu(`/view/${VIEW_ID}`);
+    console.log(JSON.stringify(v, null, 2).slice(0, 4000));
+  } catch (e) {
+    console.log(`view fetch failed: ${e.message}`);
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // 2. Find the Scrofano Law PC folder
+  // ───────────────────────────────────────────────────────────────────────
+  console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log(`STEP 2: find Scrofano Law PC folder in team ${TEAM_ID}`);
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+  let scrofanoFolder = null;
+  const { spaces = [] } = await cu(`/team/${TEAM_ID}/space?archived=false`);
+  for (const space of spaces) {
+    const { folders = [] } = await cu(`/space/${space.id}/folder?archived=false`);
+    for (const f of folders) {
+      if (String(f.name || '').toLowerCase().includes('scrofano')) {
+        scrofanoFolder = { ...f, _space: space.name };
+        console.log(`Found: ${space.name} → ${f.name}  (folder id: ${f.id})`);
+      }
     }
   }
-  return false;
-}
+  if (!scrofanoFolder) {
+    console.log('No folder name matched "scrofano" in any space.');
+    return;
+  }
 
-(async () => {
-  console.log(`Searching ClickUp list ${LIST_ID} for tasks matching "${NEEDLE}"...\n`);
-  const hits = [];
-
-  // Two passes: archived=false (live), then archived=true (trashed).
-  for (const archived of ['false', 'true']) {
-    let label = archived === 'true' ? 'ARCHIVED/TRASH' : 'LIVE';
-    for (let page = 0; page < 30; page++) {
+  // ───────────────────────────────────────────────────────────────────────
+  // 3. Walk every list under the Scrofano folder, print tasks (live+arch)
+  // ───────────────────────────────────────────────────────────────────────
+  console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log(`STEP 3: tasks in every Scrofano sublist`);
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  const lists = scrofanoFolder.lists || [];
+  for (const list of lists) {
+    console.log(`\n── LIST: ${list.name} (id ${list.id})`);
+    for (const archived of ['false', 'true']) {
       const params = new URLSearchParams({
-        page: String(page),
+        page: '0',
         archived,
         subtasks: 'true',
         include_closed: 'true',
       });
-      const data = await cuFetch(`/list/${encodeURIComponent(LIST_ID)}/task?${params}`);
-      const tasks = Array.isArray(data?.tasks) ? data.tasks : [];
-      if (!tasks.length) break;
-      for (const t of tasks) {
-        if (matches(t)) hits.push({ archived: label, t });
+      try {
+        const data = await cu(`/list/${list.id}/task?${params}`);
+        const tasks = data?.tasks || [];
+        const label = archived === 'true' ? '  [archived]' : '  [live]    ';
+        if (!tasks.length) {
+          console.log(`${label} (no tasks)`);
+          continue;
+        }
+        for (const t of tasks) {
+          const ci = String(t.name || '').toLowerCase().includes('client info') ||
+                     String(t.name || '').toLowerCase().includes('information');
+          console.log(`${label} ${ci ? '★' : ' '} ${t.name}   [id ${t.id}, status ${t?.status?.status || '?'}]`);
+        }
+      } catch (e) {
+        console.log(`  fetch failed: ${e.message}`);
       }
-      if (tasks.length < 100) break;
     }
-  }
-
-  if (!hits.length) {
-    console.log(`No tasks matched "${NEEDLE}" in either live or archived sets.`);
-    console.log('That means the task is either:');
-    console.log('  (a) permanently deleted (past Trash retention), or');
-    console.log('  (b) under a different parent list, or');
-    console.log('  (c) renamed so the needle no longer matches.');
-    return;
-  }
-
-  for (const { archived, t } of hits) {
-    console.log(`[${archived}] ${t.name}`);
-    console.log(`  id:      ${t.id}`);
-    console.log(`  status:  ${t?.status?.status || '?'}`);
-    console.log(`  url:     ${t.url}`);
-    console.log(`  list:    ${t?.list?.name || ''} (${t?.list?.id || ''})`);
-    console.log(`  parent:  ${t.parent || '(none)'}`);
-    console.log(`  updated: ${t.date_updated ? new Date(Number(t.date_updated)).toISOString() : '?'}`);
-    console.log('');
   }
 })().catch(e => { console.error(e.message); process.exit(1); });
