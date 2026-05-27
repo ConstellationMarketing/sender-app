@@ -874,15 +874,19 @@
     }
 
     function renderSettings() {
+      // Settings page is now just the theme picker. The "Your account" card
+      // was removed — it was pulling data.users[0] (random first row from
+      // the snapshot), which usually wasn't the logged-in user. The OS shell
+      // already shows who you're signed in as in its own header; no value
+      // in duplicating that here.
       const theme = getTheme();
-      const me = getCurrentUser();
       const themeBtn = (id, label) => `
         <button type="button"
           class="px-3 py-1.5 text-xs rounded-md border ${theme === id ? 'bg-slate-900 text-white border-slate-900' : 'bg-white border-slate-200 hover:bg-slate-50'}"
           onclick="setTheme('${id}')">${label}</button>`;
       return `
         ${pageHeader('Settings', 'Your preferences for the Sender bot.')}
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="max-w-md">
           ${card(`
             <div class="px-5 py-4">
               <h3 class="text-sm font-semibold mb-1">Appearance</h3>
@@ -891,17 +895,6 @@
                 ${themeBtn('light',  'Light')}
                 ${themeBtn('dark',   'Dark')}
                 ${themeBtn('system', 'System')}
-              </div>
-            </div>
-          `)}
-          ${card(`
-            <div class="px-5 py-4">
-              <h3 class="text-sm font-semibold mb-1">Your account</h3>
-              <p class="text-xs text-ink-soft mb-3">Signed in as:</p>
-              <div class="space-y-1">
-                <div class="text-sm font-medium">${esc(me.full_name || '—')}</div>
-                <div class="text-xs text-ink-soft">${esc(me.email || '—')}</div>
-                <div class="pt-2"><span class="pill pill-neutral">${esc(me.role || '—')}</span></div>
               </div>
             </div>
           `)}
