@@ -463,14 +463,22 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
   // opening Email Logs and reading each row by hand.
   const failures = [];
 
-  // ClickUp's CRM sometimes stores multiple emails in a single field
-  // (comma/semicolon-separated, e.g. "steve@x.com, allicia@x.com"). Split
-  // and send one Mailgun call per address — otherwise Mailgun rejects the
-  // whole row with "from parameter is not a valid address."
-  const splitEmails = (s) => String(s || '')
-    .split(/[,;\n]/)
-    .map(x => x.trim())
-    .filter(x => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(x));
+  // ClickUp's CRM stores multi-email fields with any separator (commas,
+  // semicolons, newlines, even just spaces between addresses). Rather than
+  // split on a delimiter list and risk missing one, extract every
+  // email-shaped substring from the value. Mailgun then gets one valid
+  // address per call.
+  const splitEmails = (s) => {
+    if (!s) return [];
+    const matches = String(s).match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || [];
+    const seen = new Set();
+    return matches.map(x => x.trim()).filter(x => {
+      const k = x.toLowerCase();
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+  };
 
   for (const qi of queued) {
     const recipient = recipients.find(r => r.id === qi.recipient_id) || {};

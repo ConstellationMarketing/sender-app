@@ -76,8 +76,10 @@
 </head>
 <body class="text-ink">
   <div class="flex h-screen overflow-hidden">
-    <!-- Sidebar -->
-    <aside class="w-60 shrink-0 border-r border-slate-200 bg-white flex flex-col">
+    <!-- Sidebar — narrower (192px instead of 240px) to give the main
+         content area more room when the Sender is rendered inside the OS
+         shell iframe. The labels still fit at this width. -->
+    <aside class="w-48 shrink-0 border-r border-slate-200 bg-white flex flex-col">
       <div class="h-14 flex items-center gap-2 px-5">
         <div class="h-8 w-8 rounded-lg bg-ink text-white flex items-center justify-center text-sm font-bold">✉</div>
         <div>
@@ -645,49 +647,65 @@
               // belonged to before the user moved them here).
               const listsById = Object.fromEntries(data.lists.map(l => [l.id, l]));
               // Firm column dropped — the firm name was redundant with the
-              // Client column on most rows (the ClickUp task name IS the
-              // firm) and the column got wrecked when the CRM had long
-              // descriptive Firm fields. The freed space goes to Email,
-              // which now stacks one address per line when a client has
-              // multiple contacts (split on comma / semicolon / newline).
-              const splitEmails = (s) => String(s || '')
-                .split(/[,;\n]/)
-                .map(x => x.trim())
-                .filter(Boolean);
+              // Client column on most rows. Emails now stack one per line.
+              //
+              // Splitting is done by RFC-shape extraction rather than a
+              // delimiter list. The CRM stores multi-email fields with all
+              // sorts of separators (comma, semicolon, space, newline, even
+              // "and"), so we just match anything that looks like an email
+              // — works for "a@x.com, b@x.com" AND "a@x.com b@x.com" AND
+              // "a@x.com\nb@x.com" alike. Dedupes case-insensitively.
+              const splitEmails = (s) => {
+                if (!s) return [];
+                const matches = String(s).match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || [];
+                const seen = new Set();
+                return matches.map(x => x.trim()).filter(x => {
+                  const k = x.toLowerCase();
+                  if (seen.has(k)) return false;
+                  seen.add(k);
+                  return true;
+                });
+              };
 
+              // No min-width on the table — let it flex to fit the visible
+              // card width. Action column is icon-only (🔁 / ↩) with a
+              // title tooltip; the verbose text was the main thing
+              // pushing the table off-screen.
               return `<div class="overflow-x-auto">
-                <table class="w-full text-sm" style="min-width: 880px;">
+                <table class="w-full text-sm table-fixed">
                   <thead><tr class="text-left text-[11px] uppercase tracking-wide text-ink-soft border-b border-slate-100 bg-slate-50/50">
-                    <th class="px-4 py-3 font-medium" style="width: 28%;">Client</th>
-                    <th class="px-4 py-3 font-medium" style="width: 30%;">Emails</th>
-                    <th class="px-4 py-3 font-medium" style="width: 100px;">Status</th>
+                    <th class="px-3 py-3 font-medium" style="width: 24%;">Client</th>
+                    <th class="px-3 py-3 font-medium" style="width: 32%;">Emails</th>
+                    <th class="px-3 py-3 font-medium" style="width: 88px;">Status</th>
                     ${isRotatingList
-                      ? `<th class="px-4 py-3 font-medium">Originally in</th>`
-                      : `<th class="px-4 py-3 font-medium">Lists</th>`}
-                    <th class="px-4 py-3 font-medium" style="width: 110px;">Last emailed</th>
-                    <th class="px-4 py-3" style="width: 130px;"></th>
+                      ? `<th class="px-3 py-3 font-medium">Originally in</th>`
+                      : `<th class="px-3 py-3 font-medium">Lists</th>`}
+                    <th class="px-3 py-3 font-medium" style="width: 90px;">Last sent</th>
+                    <th class="px-2 py-3" style="width: 56px;"></th>
                   </tr></thead><tbody>
                     ${visible.map(c => {
                       const myLists = listsByRecipient[c.id] || [];
                       const originalList = c.original_list_id ? listsById[c.original_list_id] : null;
                       const emails = splitEmails(c.email);
                       return `<tr class="border-b border-slate-100 last:border-0 hover:bg-slate-50/50">
-                        <td class="px-4 py-3 font-medium align-top">${esc(c.name)}</td>
-                        <td class="px-4 py-3 text-ink-muted align-top">
+                        <td class="px-3 py-3 font-medium align-top">
+                          <div class="truncate" title="${esc(c.name)}">${esc(c.name)}</div>
+                        </td>
+                        <td class="px-3 py-3 text-ink-muted align-top">
                           ${emails.length === 0
                             ? '<span class="text-xs text-ink-soft">—</span>'
-                            : `<div class="space-y-1">${emails.map(e => `<a href="mailto:${esc(e)}" class="hover:underline block truncate" style="max-width: 280px;" title="${esc(e)}">${esc(e)}</a>`).join('')}</div>`}
+                            : `<div class="space-y-1">${emails.map(e => `<a href="mailto:${esc(e)}" class="hover:underline block truncate" title="${esc(e)}">${esc(e)}</a>`).join('')}</div>`}
                         </td>
-                        <td class="px-4 py-3 align-top"><span class="pill pill-${esc(c.status)}">${esc(c.status)}</span></td>
+                        <td class="px-3 py-3 align-top"><span class="pill pill-${esc(c.status)}">${esc(c.status)}</span></td>
                         ${isRotatingList
-                          ? `<td class="px-4 py-3 align-top">${originalList ? `<span class="pill pill-neutral">${esc(originalList.name)}</span>` : '<span class="text-xs text-ink-soft">—</span>'}</td>`
-                          : `<td class="px-4 py-3 align-top">${myLists.length === 0 ? '<span class="text-xs text-ink-soft">—</span>' : `<div class="flex flex-wrap gap-1">${myLists.map(n => `<span class="pill pill-neutral">${esc(n)}</span>`).join('')}</div>`}</td>`}
-                        <td class="px-4 py-3 text-ink-muted text-xs align-top">${c.last_emailed_at ? relTime(c.last_emailed_at) : 'never'}</td>
-                        <td class="px-4 py-3 text-right whitespace-nowrap align-top">
+                          ? `<td class="px-3 py-3 align-top">${originalList ? `<span class="pill pill-neutral">${esc(originalList.name)}</span>` : '<span class="text-xs text-ink-soft">—</span>'}</td>`
+                          : `<td class="px-3 py-3 align-top">${myLists.length === 0 ? '<span class="text-xs text-ink-soft">—</span>' : `<div class="flex flex-wrap gap-1">${myLists.map(n => `<span class="pill pill-neutral">${esc(n)}</span>`).join('')}</div>`}</td>`}
+                        <td class="px-3 py-3 text-ink-muted text-xs align-top">${c.last_emailed_at ? relTime(c.last_emailed_at) : 'never'}</td>
+                        <td class="px-2 py-3 text-right align-top">
                           ${isRotatingList
-                            ? `<button class="btn btn-out btn-sm" title="Move back to original list" onclick="moveBackToOriginal('${c.id}')">↩ Move back</button>`
+                            ? `<button class="btn btn-out btn-sm" style="padding:4px 8px;" title="Move back to original list" onclick="moveBackToOriginal('${c.id}')">↩</button>`
                             : (!showingAll
-                                ? `<button class="btn btn-out btn-sm" title="Move to Rotating List" onclick="moveToRotating('${c.id}')">🔁 Rotate</button>`
+                                ? `<button class="btn btn-out btn-sm" style="padding:4px 8px;" title="Move to Rotating List" onclick="moveToRotating('${c.id}')">🔁</button>`
                                 : '')}
                         </td>
                       </tr>`;
