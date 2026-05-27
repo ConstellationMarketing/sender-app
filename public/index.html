@@ -837,6 +837,57 @@
       catch (e) { toast(e.message, false); }
     };
 
+    // 👁 Preview template — renders the body HTML with sample merge variables
+    // inside a sandboxed iframe so the template's own CSS can't leak into
+    // the app shell. Shows the subject line above the iframe so the user
+    // sees what a recipient would see in their inbox header.
+    const SAMPLE_MERGE = {
+      name:            'Sample Client',
+      client_name:     'Sample Client',
+      email:           'sample@firm.com',
+      firm:            'Sample & Co. LLP',
+      account_manager: 'Luiza Castro',
+    };
+    function applyMergeClient(text, row) {
+      if (!text) return '';
+      return String(text).replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_, k) => row[k] ?? `{{${k}}}`);
+    }
+    window.previewTemplate = (tplJson) => {
+      const t = typeof tplJson === 'string' ? JSON.parse(tplJson) : tplJson;
+      const subject = applyMergeClient(t.subject || t.name || '(no subject)', SAMPLE_MERGE);
+      const body    = applyMergeClient(t.body_html || '<p style="color:#94a3b8">(template body is empty)</p>', SAMPLE_MERGE);
+      // Close any prior preview before opening a new one.
+      const existing = document.getElementById('preview-dialog');
+      if (existing) existing.remove();
+      const dlg = document.createElement('dialog');
+      dlg.id = 'preview-dialog';
+      dlg.className = 'rounded-2xl border border-slate-200 shadow-2xl p-0 backdrop:bg-black/40';
+      dlg.style.maxWidth = '720px';
+      dlg.style.width = '90vw';
+      dlg.innerHTML = `
+        <div class="p-5 border-b border-slate-100 flex items-start justify-between gap-4">
+          <div class="min-w-0">
+            <div class="text-[11px] uppercase tracking-wide text-ink-soft font-semibold">Preview · merge vars filled with sample data</div>
+            <div class="mt-1 text-sm font-semibold break-words">${esc(t.name || '')}</div>
+            <div class="mt-2 text-xs text-ink-soft">From: Constellation Marketing &lt;reports@mg.goconstellation.com&gt;</div>
+            <div class="text-xs text-ink-soft">To: ${esc(SAMPLE_MERGE.email)}</div>
+            <div class="mt-2 text-sm"><span class="text-ink-soft">Subject:</span> <span class="font-medium">${esc(subject)}</span></div>
+          </div>
+          <button class="btn btn-out btn-sm" onclick="document.getElementById('preview-dialog').close()">Close</button>
+        </div>
+        <div class="bg-slate-50 p-4">
+          <iframe id="preview-frame" sandbox="allow-same-origin" style="width:100%; height:60vh; border:1px solid #e2e8f0; border-radius:12px; background:#fff;"></iframe>
+        </div>`;
+      document.body.appendChild(dlg);
+      dlg.showModal();
+      // Write the body via srcdoc-style after open so the iframe owns its own
+      // document (no risk of template <style> bleeding into the app).
+      const frame = dlg.querySelector('#preview-frame');
+      const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{margin:0;padding:24px;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#0f172a;}</style></head><body>${body}</body></html>`;
+      const doc = frame.contentDocument || frame.contentWindow.document;
+      doc.open(); doc.write(html); doc.close();
+    };
+
     function renderTemplates() {
       const action = `<button class="btn btn-pri" onclick="templateModal()">+ New template</button>`;
       return `
@@ -854,7 +905,8 @@
                 <p class="text-xs text-ink-soft mt-0.5">Updated ${relTime(t.updated_at)}</p>
                 <div class="mt-3"><span class="pill pill-${esc(t.type)}">${esc(t.type)}</span></div>
                 <div class="mt-4 flex gap-2">
-                  <button class="btn btn-out btn-sm flex-1" onclick="templateModal(${JSON.stringify(t).replace(/"/g,'&quot;')})">Edit</button>
+                  <button class="btn btn-pri btn-sm flex-1" title="See what a recipient would see — sample merge vars filled in" onclick="previewTemplate(${JSON.stringify(t).replace(/"/g,'&quot;')})">👁 Preview</button>
+                  <button class="btn btn-out btn-sm" onclick="templateModal(${JSON.stringify(t).replace(/"/g,'&quot;')})">Edit</button>
                   <button class="btn btn-out btn-sm" onclick="deleteTemplate('${t.id}')">Delete</button>
                 </div>
               </div>
