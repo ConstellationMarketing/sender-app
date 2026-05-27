@@ -408,33 +408,53 @@
       catch (e) { toast(e.message, false); }
     };
 
-    // 🧪 Test send — prompts for an email (defaults to the address the user
-    // tested with last time, persisted in localStorage). Hits the backend's
-    // /batches/:id/test-send which renders the template with merge vars
-    // pulled from a real sample recipient on the audience list (if any),
-    // prepends a yellow "[TEST]" warning banner, and sends to ONLY the
-    // address the user gave. The real audience list isn't touched.
-    const TEST_EMAIL_KEY = 'sender-test-email';
+    // 🧪 Test send — opens a modal where the user can paste one or more
+    // recipient emails (comma, space, or newline separated). Hits the
+    // backend's /batches/:id/test-send which renders the template with
+    // merge variables pulled from a real sample recipient on the audience
+    // list (if any), prepends a yellow "[TEST]" warning banner, and sends
+    // to ONLY the addresses the user gave. The real audience list isn't
+    // touched. Last-used list of testers is remembered in localStorage so
+    // the next test pre-fills with the same addresses.
+    const TEST_EMAIL_KEY = 'sender-test-emails';
     window.testSendBatch = async id => {
       const prior = localStorage.getItem(TEST_EMAIL_KEY) || '';
-      const to = prompt(
-        'Test-send this batch to which email?\n\nThis is a dry-run — the real audience list will NOT be contacted. ' +
-        'The template renders with merge variables pulled from the first active client on the list.',
-        prior
-      );
-      if (!to) return;                       // user hit cancel
-      const trimmed = to.trim();
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
-        toast('That doesn\'t look like a valid email.', false);
-        return;
-      }
-      localStorage.setItem(TEST_EMAIL_KEY, trimmed);
-      try {
-        const r = await api('POST', `/batches/${id}/test-send`, { to: trimmed });
-        toast(`✓ Test sent to ${trimmed}${r.mergedFrom ? ` (using ${r.mergedFrom}'s merge vars)` : ''}`, true);
-      } catch (e) {
-        toast('Test send failed: ' + e.message, false);
-      }
+      openModal({
+        title: 'Test-send this batch',
+        submitLabel: 'Send test',
+        fields: [
+          {
+            name: 'to_list',
+            label: 'Recipients (one or more)',
+            type: 'textarea',
+            rows: 4,
+            required: true,
+            value: prior,
+            placeholder: 'omar@goconstellation.com, luiza@goconstellation.com',
+            hint: 'Comma, space, or newline separated. The real audience list is NOT contacted — merge vars are pulled from the first active client.',
+          },
+        ],
+        onSubmit: async (form) => {
+          const raw = String(form.to_list || '').trim();
+          const matches = raw.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || [];
+          if (matches.length === 0) {
+            throw new Error("Couldn't find any valid email addresses in that input.");
+          }
+          // Remember what they typed so the next test pre-fills it.
+          localStorage.setItem(TEST_EMAIL_KEY, raw);
+          const r = await api('POST', `/batches/${id}/test-send`, { to_list: raw });
+          const results = Array.isArray(r.results) ? r.results : [];
+          const okCount = results.filter(x => x.ok).length;
+          const failed  = results.filter(x => !x.ok);
+          if (failed.length === 0) {
+            toast(`✓ Test sent to ${okCount} address${okCount === 1 ? '' : 'es'}${r.mergedFrom ? ` (using ${r.mergedFrom}'s merge vars)` : ''}`, true);
+          } else {
+            const first = failed[0];
+            toast(`Sent ${okCount}/${results.length} — failed: ${first.to} (${first.error})`, false);
+            console.warn('[sender] test-send failures:', failed);
+          }
+        },
+      });
     };
     window.sendBatch = async id => {
       if (!confirm('Send this batch now to all recipients in the audience list?')) return;
@@ -741,7 +761,20 @@
       if (btn) { btn.disabled = true; btn.textContent = '🔄 Syncing…'; }
       try {
         const r = await api('POST', '/clients-sync');
-        toast(`Synced ${r.synced ?? 0} client${r.synced === 1 ? '' : 's'} from ClickUp${r.skipped ? ` (${r.skipped} skipped — no matching assignee)` : ''}`);
+        // If the sync skipped rows AND has sample errors, show the first
+        // one in the toast — way more actionable than just "X skipped".
+        // Most common cause: Postgres CHECK constraint on the status
+        // column rejecting 'onboarding'/'live' values.
+        const firstErr = Array.isArray(r.errors) && r.errors.length ? r.errors[0] : null;
+        if (r.skipped && firstErr) {
+          toast(
+            `Synced ${r.synced} · ${r.skipped} skipped. First error (${firstErr.email}): ${firstErr.error}`,
+            false
+          );
+          console.warn('[clients-sync] all errors:', r.errors);
+        } else {
+          toast(`Synced ${r.synced ?? 0} client${r.synced === 1 ? '' : 's'} from ClickUp${r.skipped ? ` · ${r.skipped} skipped` : ''}`);
+        }
         refresh();
       } catch (e) {
         toast('Sync failed: ' + e.message, false);

@@ -331,9 +331,19 @@ router.post('/batches/:id/test-send', wrap(async (req, res) => {
   const sb = getSupabase();
   ensureMailgun();
 
-  const toEmail = String(req.body?.to || '').trim();
-  if (!toEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(toEmail)) {
-    return bad(res, 400, 'A valid `to` email is required for the test send');
+  // Accept either `to` (single email, kept for backward compat) or
+  // `to_list` (string of comma/space/newline-separated emails — the new
+  // modal sends this so the user can test against multiple inboxes at once).
+  const rawTo = req.body?.to_list || req.body?.to || '';
+  const matches = String(rawTo).match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || [];
+  const seen = new Set();
+  const toEmails = matches.map(x => x.trim()).filter(x => {
+    const k = x.toLowerCase();
+    if (seen.has(k)) return false;
+    seen.add(k); return true;
+  });
+  if (!toEmails.length) {
+    return bad(res, 400, 'At least one valid email address is required');
   }
   const sampleRecipientId = req.body?.sample_recipient_id || null;
 
@@ -353,7 +363,7 @@ router.post('/batches/:id/test-send', wrap(async (req, res) => {
   let mergeRow = {
     name:            'Test Recipient',
     client_name:     'Test Recipient',
-    email:           toEmail,
+    email:           toEmails[0],
     firm:            'Test Firm LLP',
     account_manager: 'Test Manager',
   };
@@ -366,7 +376,7 @@ router.post('/batches/:id/test-send', wrap(async (req, res) => {
     if (sample) {
       mergeRow = {
         name: sample.name, client_name: sample.name,
-        email: toEmail,  // we still send to the test address, not the real one
+        email: toEmails[0],  // we still send to the test addresses, not the real one
         firm: sample.firm, account_manager: sample.account_manager,
       };
     }
@@ -378,11 +388,13 @@ router.post('/batches/:id/test-send', wrap(async (req, res) => {
       .select('recipient:sender_clients_recipients(name, email, firm, account_manager, status)')
       .eq('list_id', batch.audience_list_id)
       .limit(5);
-    const sample = (members || []).map(m => m.recipient).find(r => r && r.status === 'active' || r && r.status === 'live' || r && r.status === 'onboarding');
+    const sample = (members || [])
+      .map(m => m.recipient)
+      .find(r => r && (r.status === 'active' || r.status === 'live' || r.status === 'onboarding'));
     if (sample) {
       mergeRow = {
         name: sample.name, client_name: sample.name,
-        email: toEmail,
+        email: toEmails[0],
         firm: sample.firm, account_manager: sample.account_manager,
       };
     }
@@ -397,17 +409,27 @@ router.post('/batches/:id/test-send', wrap(async (req, res) => {
     ${applyMergeVars(tpl.body_html || '', mergeRow)}
   `;
 
-  try {
-    const result = await sendOne({ to: toEmail, subject, html });
-    return res.json({
-      ok: true,
-      to: toEmail,
-      mergedFrom: mergeRow.name,
-      mailgun: result,
-    });
-  } catch (e) {
-    return bad(res, 502, `Test send failed: ${e.message || e}`);
+  // Send to each test address. Don't bail on first failure — we want a
+  // per-address breakdown so the user can tell which inbox didn't get it.
+  const results = [];
+  for (const addr of toEmails) {
+    try {
+      const out = await sendOne({ to: addr, subject, html });
+      results.push({ to: addr, ok: true, id: out?.id || null });
+    } catch (e) {
+      results.push({ to: addr, ok: false, error: String(e.message || e).slice(0, 500) });
+    }
   }
+  const okCount   = results.filter(r => r.ok).length;
+  const failCount = results.length - okCount;
+  return res.json({
+    ok:         failCount === 0,
+    to:         toEmails,
+    mergedFrom: mergeRow.name,
+    results,
+    sentCount:  okCount,
+    failedCount: failCount,
+  });
 }));
 
 // ─── SEND a batch ──────────────────────────────────────────────────────────
@@ -642,6 +664,9 @@ router.post('/clients-sync', wrap(async (_req, res) => {
   const stickyIds = new Set((rotatingMembers || []).map(m => m.recipient_id));
 
   let synced = 0, skipped = 0;
+  // Reset the error buffer for this run so the response only shows errors
+  // from THIS sync attempt, not stale ones from a previous run.
+  global.__lastSyncErrors = [];
 
   for (const c of clients) {
     // Upsert the recipient row by email.
@@ -663,7 +688,21 @@ router.post('/clients-sync', wrap(async (_req, res) => {
       .upsert(row, { onConflict: 'email' })
       .select('id, email, original_list_id')
       .single();
-    if (upErr) { skipped++; continue; }
+    if (upErr) {
+      // Surface a sample of upsert errors back to the caller. Previously
+      // these were just silently skipped, which hid the real reason the
+      // status field wasn't sticking — Postgres CHECK constraints on the
+      // `status` column reject 'onboarding'/'live' if the constraint only
+      // allows 'active' (etc.), and the row falls back to whatever it had
+      // before. We keep the first 5 errors so the UI can show them.
+      skipped++;
+      if (!global.__lastSyncErrors) global.__lastSyncErrors = [];
+      if (global.__lastSyncErrors.length < 5) {
+        global.__lastSyncErrors.push({ email: row.email, error: upErr.message });
+      }
+      console.error('[clients-sync] upsert failed:', row.email, upErr.message);
+      continue;
+    }
 
     // If this recipient is in the Rotating List right now, don't touch their
     // manager-list memberships at all — rotation overrides auto-routing.
@@ -700,6 +739,7 @@ router.post('/clients-sync', wrap(async (_req, res) => {
     ok:       true,
     synced,
     skipped,
+    errors:   global.__lastSyncErrors || [],
     lists:    Object.values(lists).map(l => ({ id: l.id, name: l.name })),
   });
 }));
