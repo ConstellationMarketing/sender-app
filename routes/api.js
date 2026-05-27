@@ -8,6 +8,10 @@ const express = require('express');
 const { getSupabase } = require('../lib/supabase');
 const { sendOne, applyMergeVars, ensureEnv: ensureMailgun } = require('../lib/mailgun');
 const { parseCsv } = require('../lib/csv');
+// fetchActiveClients now reads from the OS CRM's Supabase `client` table
+// (the source of truth ClickUp itself feeds into), so no new env vars are
+// needed beyond the Supabase keys the app already has.
+const { fetchActiveClients } = require('../lib/crm');
 
 const router = express.Router();
 
@@ -50,6 +54,8 @@ router.get('/snapshot', wrap(async (_req, res) => {
     queueRes, logsRes, usersRes,
     activeCountRes, sentCountRes, failedCountRes, scheduledCountRes,
   ] = await Promise.all([
+    // Select * already brings original_list_id; explicit here so future
+    // schema changes don't accidentally drop the column from the payload.
     sb.from('sender_clients_recipients').select('*').order('name'),
     sb.from('sender_clients_lists').select('*').order('name'),
     sb.from('sender_clients_list_members').select('list_id, recipient_id'),
@@ -414,6 +420,246 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
     failed,
     failures,                                          // [{ email, reason }, …]
   });
+}));
+
+// ─── ClickUp sync + Rotating List ──────────────────────────────────────────
+//
+// Four lists are treated as "fixed" in the new UI: Luiza, Federico,
+// Alejandra (account-manager lists, populated from ClickUp), and Rotating
+// List (where users manually shuffle clients between managers). The list
+// names are configurable via env, so a name change in the team doesn't
+// require a code edit. Defaults match what the spec asked for.
+
+const FIXED_LISTS = (process.env.SENDER_FIXED_LISTS || 'Luiza,Federico,Alejandra')
+  .split(',').map(s => s.trim()).filter(Boolean);
+const ROTATING_LIST_NAME = (process.env.SENDER_ROTATING_LIST_NAME || 'Rotating List').trim();
+
+// Match a ClickUp assignee.username/email against an account-manager list
+// name. We match if the list name appears anywhere in the assignee's display
+// name OR email local-part — case-insensitive substring. So "Luiza" matches
+// "luiza@goconstellation.com" AND "Luiza Feijo" AND "Luiza F."
+function assigneeMatchesList(assignee, listName) {
+  if (!assignee || !listName) return false;
+  const target = String(listName).toLowerCase();
+  const candidates = [
+    String(assignee.name  || '').toLowerCase(),
+    String(assignee.email || '').toLowerCase(),
+  ];
+  return candidates.some(c => c.includes(target));
+}
+
+/**
+ * Ensure the four fixed lists (three managers + Rotating) exist in
+ * sender_clients_lists. Idempotent — safe to call before every sync. Returns
+ * an object keyed by list name with the {id, ...} row.
+ */
+async function ensureFixedLists(sb) {
+  const wanted = [...FIXED_LISTS, ROTATING_LIST_NAME];
+  const { data: existing } = await sb
+    .from('sender_clients_lists')
+    .select('id, name, owner, description')
+    .in('name', wanted);
+  const byName = Object.fromEntries((existing || []).map(l => [l.name, l]));
+
+  const toCreate = wanted.filter(n => !byName[n]).map(n => ({
+    name: n,
+    owner: n === ROTATING_LIST_NAME ? null : n,
+    description: n === ROTATING_LIST_NAME
+      ? 'Clients manually rotated off their default manager list. Move-back returns them to wherever they came from.'
+      : `Auto-populated from ClickUp by assignee match on "${n}".`,
+  }));
+  if (toCreate.length) {
+    const { data: created, error } = await sb
+      .from('sender_clients_lists')
+      .insert(toCreate)
+      .select('id, name, owner, description');
+    if (error) throw new Error(`Could not seed fixed lists: ${error.message}`);
+    for (const row of (created || [])) byName[row.name] = row;
+  }
+  return byName;
+}
+
+// POST /api/clients-sync — pulls active+onboarding clients from ClickUp,
+// upserts them into sender_clients_recipients (by email), and re-assigns
+// list memberships based on assignees. Existing Rotating List memberships
+// are preserved — a sync doesn't yank someone back from the rotation.
+router.post('/clients-sync', wrap(async (_req, res) => {
+  const sb = getSupabase();
+  const lists = await ensureFixedLists(sb);   // {name → list row}
+  const rotatingId = lists[ROTATING_LIST_NAME]?.id;
+
+  let clients;
+  try {
+    clients = await fetchActiveClients();
+  } catch (e) {
+    return bad(res, 502, `ClickUp fetch failed: ${e.message}`);
+  }
+
+  // Look up which recipients are currently sitting in the Rotating List so
+  // we can skip the manager-list reassignment for them (rotation is sticky).
+  const { data: rotatingMembers } = rotatingId
+    ? await sb.from('sender_clients_list_members').select('recipient_id').eq('list_id', rotatingId)
+    : { data: [] };
+  const stickyIds = new Set((rotatingMembers || []).map(m => m.recipient_id));
+
+  let synced = 0, skipped = 0;
+
+  for (const c of clients) {
+    // Upsert the recipient row by email.
+    const accountManagerName = (c.assignees || [])
+      .map(a => a.name || a.email || '')
+      .filter(Boolean)
+      .join(', ');
+    const row = {
+      name:            c.name,
+      email:           c.email,
+      firm:            c.firm || null,
+      account_manager: accountManagerName || null,
+      status:          'active',
+    };
+    const { data: upserted, error: upErr } = await sb
+      .from('sender_clients_recipients')
+      .upsert(row, { onConflict: 'email' })
+      .select('id, email, original_list_id')
+      .single();
+    if (upErr) { skipped++; continue; }
+
+    // If this recipient is in the Rotating List right now, don't touch their
+    // manager-list memberships at all — rotation overrides auto-routing.
+    if (stickyIds.has(upserted.id)) { synced++; continue; }
+
+    // Figure out which manager list(s) this client belongs in.
+    const matchedListIds = [];
+    for (const managerName of FIXED_LISTS) {
+      const listRow = lists[managerName];
+      if (!listRow) continue;
+      if ((c.assignees || []).some(a => assigneeMatchesList(a, managerName))) {
+        matchedListIds.push(listRow.id);
+      }
+    }
+
+    // Wipe existing manager-list memberships (but keep Rotating intact —
+    // already filtered above) and re-write them from the match set.
+    const managerListIds = FIXED_LISTS.map(n => lists[n]?.id).filter(Boolean);
+    if (managerListIds.length) {
+      await sb.from('sender_clients_list_members')
+        .delete()
+        .eq('recipient_id', upserted.id)
+        .in('list_id', managerListIds);
+    }
+    if (matchedListIds.length) {
+      await sb.from('sender_clients_list_members').insert(
+        matchedListIds.map(list_id => ({ list_id, recipient_id: upserted.id }))
+      );
+    }
+    synced++;
+  }
+
+  res.json({
+    ok:       true,
+    synced,
+    skipped,
+    lists:    Object.values(lists).map(l => ({ id: l.id, name: l.name })),
+  });
+}));
+
+// POST /api/recipients/:id/move-to-rotating — remove from all manager lists,
+// remember which one they came from on the recipient row, add to Rotating.
+router.post('/recipients/:id/move-to-rotating', wrap(async (req, res) => {
+  const sb = getSupabase();
+  const recipientId = req.params.id;
+  const lists = await ensureFixedLists(sb);
+  const rotatingId = lists[ROTATING_LIST_NAME]?.id;
+  if (!rotatingId) return bad(res, 500, 'Rotating List not configured');
+
+  // Find current manager-list memberships so we can remember the "original"
+  // before yanking them. If the client is in multiple manager lists (rare —
+  // happens when someone is assigned to two managers in ClickUp), pick the
+  // first one alphabetically — predictable, easy to reverse.
+  const managerListIds = FIXED_LISTS.map(n => lists[n]?.id).filter(Boolean);
+  const { data: currentMemberships } = await sb
+    .from('sender_clients_list_members')
+    .select('list_id')
+    .eq('recipient_id', recipientId)
+    .in('list_id', managerListIds);
+
+  let originalId = null;
+  if ((currentMemberships || []).length) {
+    const candidates = currentMemberships.map(m => m.list_id);
+    // sort by the FIXED_LISTS order, so "first alphabetically" really means
+    // first in our configured fixed-list order.
+    originalId = managerListIds.find(id => candidates.includes(id)) || candidates[0];
+  }
+
+  if (originalId) {
+    await sb.from('sender_clients_recipients')
+      .update({ original_list_id: originalId })
+      .eq('id', recipientId);
+  }
+
+  // Remove from manager lists, then add to Rotating.
+  if (managerListIds.length) {
+    await sb.from('sender_clients_list_members')
+      .delete()
+      .eq('recipient_id', recipientId)
+      .in('list_id', managerListIds);
+  }
+  // Idempotent insert (don't error if already in Rotating).
+  await sb.from('sender_clients_list_members')
+    .delete()
+    .eq('recipient_id', recipientId)
+    .eq('list_id', rotatingId);
+  await sb.from('sender_clients_list_members').insert({
+    list_id:      rotatingId,
+    recipient_id: recipientId,
+  });
+
+  res.json({ ok: true, original_list_id: originalId });
+}));
+
+// POST /api/recipients/:id/move-back — inverse of move-to-rotating. Removes
+// from Rotating, restores membership in the previously-stored original list,
+// clears the original_list_id column.
+router.post('/recipients/:id/move-back', wrap(async (req, res) => {
+  const sb = getSupabase();
+  const recipientId = req.params.id;
+  const lists = await ensureFixedLists(sb);
+  const rotatingId = lists[ROTATING_LIST_NAME]?.id;
+
+  const { data: rec, error: recErr } = await sb
+    .from('sender_clients_recipients')
+    .select('id, original_list_id')
+    .eq('id', recipientId)
+    .single();
+  if (recErr || !rec) return bad(res, 404, 'Recipient not found');
+
+  const targetListId = rec.original_list_id;
+  if (!targetListId) {
+    return bad(res, 400, 'No original list recorded — was this client ever in the Rotating List? Run Sync from ClickUp to re-assign automatically.');
+  }
+
+  // Remove from Rotating.
+  if (rotatingId) {
+    await sb.from('sender_clients_list_members')
+      .delete()
+      .eq('recipient_id', recipientId)
+      .eq('list_id', rotatingId);
+  }
+  // Add back to the original list (idempotent).
+  await sb.from('sender_clients_list_members')
+    .delete()
+    .eq('recipient_id', recipientId)
+    .eq('list_id', targetListId);
+  await sb.from('sender_clients_list_members').insert({
+    list_id:      targetListId,
+    recipient_id: recipientId,
+  });
+  // Clear the original_list_id pointer now that they're back.
+  await sb.from('sender_clients_recipients')
+    .update({ original_list_id: null })
+    .eq('id', recipientId);
+
+  res.json({ ok: true, restored_to_list_id: targetListId });
 }));
 
 module.exports = router;

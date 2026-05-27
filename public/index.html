@@ -44,6 +44,34 @@
     .toast { position: fixed; bottom: 20px; right: 20px; padding: 0.75rem 1rem; border-radius: 0.5rem; box-shadow: 0 8px 24px rgba(0,0,0,0.12); color: white; font-size: 13px; font-weight: 500; z-index: 1000; }
     .toast-ok    { background: #059669; }
     .toast-err   { background: #dc2626; }
+
+    /* ─── Dark mode ──────────────────────────────────────────────────────
+       Activated by .theme-dark on <html>. Overrides the small handful of
+       light-mode color tokens above. Tailwind handles most of the rest via
+       its color utility classes, but body bg + nav + cards + inputs need
+       explicit overrides since they're set inline via the bg-white /
+       bg-slate-* classes in the markup. */
+    html.theme-dark           { color-scheme: dark; }
+    html.theme-dark body      { background: #0f172a; color: #e2e8f0; }
+    html.theme-dark .bg-white { background: #1e293b !important; }
+    html.theme-dark .bg-slate-50  { background: #1e293b !important; }
+    html.theme-dark .bg-slate-100 { background: #334155 !important; }
+    html.theme-dark .text-ink              { color: #e2e8f0 !important; }
+    html.theme-dark .text-ink-soft         { color: #94a3b8 !important; }
+    html.theme-dark .text-ink-muted        { color: #cbd5e1 !important; }
+    html.theme-dark .border-slate-100      { border-color: #334155 !important; }
+    html.theme-dark .border-slate-200      { border-color: #334155 !important; }
+    html.theme-dark aside,
+    html.theme-dark header.sticky          { background: #1e293b !important; }
+    html.theme-dark .btn-pri               { background: #6366f1; color: #fff; border-color: #6366f1; }
+    html.theme-dark .btn-pri:hover         { background: #4f46e5; }
+    html.theme-dark .btn-out               { background: #1e293b; color: #e2e8f0; border-color: #334155; }
+    html.theme-dark .btn-out:hover         { background: #334155; }
+    html.theme-dark .field input,
+    html.theme-dark .field select,
+    html.theme-dark .field textarea        { background: #0f172a; color: #e2e8f0; border-color: #334155; }
+    html.theme-dark .pill-neutral, html.theme-dark .pill-draft { background: #334155; color: #cbd5e1; }
+    html.theme-dark dialog                 { background: #1e293b; color: #e2e8f0; }
   </style>
 </head>
 <body class="text-ink">
@@ -95,13 +123,14 @@
     // ===========================================================================
     // State
     // ===========================================================================
+    // Upload CSV page intentionally removed — clients are auto-synced from
+    // ClickUp now (see /api/clients-sync), no manual CSV imports.
     const PAGES = [
       { id: 'dashboard',       label: 'Dashboard' },
       { id: 'monthly-reports', label: 'Monthly Reports' },
       { id: 'newsletters',     label: 'Newsletters' },
       { id: 'client-lists',    label: 'Client Lists' },
       { id: 'templates',       label: 'Templates' },
-      { id: 'upload-csv',      label: 'Upload CSV' },
       { id: 'send-queue',      label: 'Send Queue' },
       { id: 'email-logs',      label: 'Email Logs' },
       { id: 'settings',        label: 'Settings' },
@@ -523,11 +552,18 @@
         if (name) listsByRecipient[m.recipient_id].push(name);
       }
 
+      // Manual "+ Add client" and "+ New list" actions were removed — lists
+      // are now a fixed set (Luiza, Federico, Alejandra, Rotating List) and
+      // clients are populated from ClickUp CRM by /api/clients-sync. The
+      // header now shows a single "Sync from ClickUp" action instead.
+      //
+      // List rows lost their pencil/delete affordances for the same reason:
+      // the fixed lists shouldn't be edited or deleted from this UI.
+      const isRotatingList = activeList && /rotating/i.test(activeList.name || '');
       return `
-        ${pageHeader('Client Lists', 'Segment clients by account manager, tier, or practice area.',
+        ${pageHeader('Client Lists', 'Auto-populated from ClickUp by account-manager assignee. Use the Rotating List to swap a client between managers.',
           `<div class="flex gap-2">
-            <button class="btn btn-out" onclick="recipientModal()">+ Add client</button>
-            <button class="btn btn-pri" onclick="listModal()">+ New list</button>
+            <button class="btn btn-pri" onclick="syncFromClickUp()" id="sync-btn">🔄 Sync from ClickUp</button>
           </div>`)}
         <div class="grid grid-cols-1 lg:grid-cols-4 gap-4">
           ${card(`
@@ -538,17 +574,14 @@
                   <div class="text-[11px] text-ink-soft">${data.recipients.length} total</div></div>
               </div>
               ${data.lists.length === 0
-                ? `<div class="px-3 py-3 text-xs text-ink-soft italic">No lists yet — click <strong>+ New list</strong>.</div>`
+                ? `<div class="px-3 py-3 text-xs text-ink-soft italic">No lists yet — click <strong>🔄 Sync from ClickUp</strong> to populate them.</div>`
                 : data.lists.map(l => {
                     const memberCount = data.listMembers.filter(m => m.list_id === l.id).length;
-                    return `<div class="group flex justify-between items-center px-3 py-2 rounded-lg cursor-pointer ${l.id === activeListId ? 'nav-active' : 'hover:bg-slate-50'}" onclick="selectList('${l.id}')">
+                    const isRotating = /rotating/i.test(l.name || '');
+                    return `<div class="flex justify-between items-center px-3 py-2 rounded-lg cursor-pointer ${l.id === activeListId ? 'nav-active' : 'hover:bg-slate-50'}" onclick="selectList('${l.id}')">
                       <div class="min-w-0">
-                        <div class="truncate">${esc(l.name)}</div>
-                        <div class="text-[11px] text-ink-soft truncate">${esc(l.owner || '—')} · ${memberCount} member${memberCount === 1 ? '' : 's'}</div>
-                      </div>
-                      <div class="hidden group-hover:flex gap-1 items-center">
-                        <button class="text-ink-soft hover:text-ink" onclick="event.stopPropagation(); listModal(${JSON.stringify(l).replace(/"/g,'&quot;')})">✎</button>
-                        <button class="text-rose-500 hover:text-rose-700" onclick="event.stopPropagation(); deleteList('${l.id}')">✕</button>
+                        <div class="truncate">${isRotating ? '🔁 ' : ''}${esc(l.name)}</div>
+                        <div class="text-[11px] text-ink-soft truncate">${memberCount} client${memberCount === 1 ? '' : 's'}</div>
                       </div>
                     </div>`;
                   }).join('')}
@@ -565,40 +598,48 @@
             ${(() => {
               const visible = showingAll ? data.recipients : data.recipients.filter(r => memberIds.has(r.id));
               if (data.recipients.length === 0) {
-                return empty('No clients yet', 'Add a client or import from CSV (Upload CSV page).', `<button class="btn btn-pri btn-sm" onclick="recipientModal()">+ Add client</button>`);
+                return empty('No clients yet', 'Click 🔄 Sync from ClickUp above to populate the three account-manager lists from your ClickUp CRM.');
               }
               if (visible.length === 0) {
                 return empty(`No clients in "${activeList?.name || 'this list'}" yet`,
-                  'Add an existing client to this list by editing them, or create a new client with this list pre-selected.',
-                  `<button class="btn btn-pri btn-sm" onclick="recipientModal()">+ Add client to ${esc(activeList?.name || 'list')}</button>`);
+                  isRotatingList
+                    ? 'Move a client here from one of the manager lists using the 🔁 button on their row.'
+                    : 'Re-run Sync from ClickUp to refresh assignments.');
               }
+              // Look up each client's "original list" name (only meaningful
+              // when viewing the Rotating List — that's the list the client
+              // belonged to before the user moved them here).
+              const listsById = Object.fromEntries(data.lists.map(l => [l.id, l]));
               return `<table class="w-full text-sm">
                 <thead><tr class="text-left text-[11px] uppercase tracking-wide text-ink-soft border-b border-slate-100">
                   <th class="px-5 py-2.5 font-medium">Client</th>
                   <th class="px-5 py-2.5 font-medium">Firm</th>
                   <th class="px-5 py-2.5 font-medium">Manager</th>
                   <th class="px-5 py-2.5 font-medium">Status</th>
-                  <th class="px-5 py-2.5 font-medium">Lists</th>
+                  ${isRotatingList
+                    ? `<th class="px-5 py-2.5 font-medium">Originally in</th>`
+                    : `<th class="px-5 py-2.5 font-medium">Lists</th>`}
                   <th class="px-5 py-2.5 font-medium">Last emailed</th>
-                  <th class="w-24 px-5 py-2.5"></th>
+                  <th class="w-32 px-5 py-2.5"></th>
                 </tr></thead><tbody>
                   ${visible.map(c => {
                     const myLists = listsByRecipient[c.id] || [];
+                    const originalList = c.original_list_id ? listsById[c.original_list_id] : null;
                     return `<tr class="border-b border-slate-100 last:border-0">
                       <td class="px-5 py-3.5"><div class="font-medium">${esc(c.name)}</div><div class="text-xs text-ink-soft">${esc(c.email)}</div></td>
                       <td class="px-5 py-3.5 text-ink-muted">${esc(c.firm || '—')}</td>
                       <td class="px-5 py-3.5 text-ink-muted">${esc(c.account_manager || '—')}</td>
                       <td class="px-5 py-3.5"><span class="pill pill-${esc(c.status)}">${esc(c.status)}</span></td>
-                      <td class="px-5 py-3.5">
-                        ${myLists.length === 0
-                          ? '<span class="text-xs text-ink-soft">—</span>'
-                          : `<div class="flex flex-wrap gap-1">${myLists.map(n => `<span class="pill pill-neutral">${esc(n)}</span>`).join('')}</div>`}
-                      </td>
+                      ${isRotatingList
+                        ? `<td class="px-5 py-3.5">${originalList ? `<span class="pill pill-neutral">${esc(originalList.name)}</span>` : '<span class="text-xs text-ink-soft">—</span>'}</td>`
+                        : `<td class="px-5 py-3.5">${myLists.length === 0 ? '<span class="text-xs text-ink-soft">—</span>' : `<div class="flex flex-wrap gap-1">${myLists.map(n => `<span class="pill pill-neutral">${esc(n)}</span>`).join('')}</div>`}</td>`}
                       <td class="px-5 py-3.5 text-ink-muted">${c.last_emailed_at ? relTime(c.last_emailed_at) : 'never'}</td>
                       <td class="px-5 py-3.5 text-right whitespace-nowrap">
-                        ${!showingAll ? `<button class="text-ink-soft hover:text-ink mr-2" title="Remove from this list" onclick="removeFromList('${activeListId}', '${c.id}')">↩</button>` : ''}
-                        <button class="text-ink-soft hover:text-ink" title="Edit client" onclick="recipientModal(${JSON.stringify(c).replace(/"/g,'&quot;')})">✎</button>
-                        <button class="text-rose-500 hover:text-rose-700 ml-1" title="Delete client" onclick="deleteRecipient('${c.id}')">✕</button>
+                        ${isRotatingList
+                          ? `<button class="btn btn-out btn-sm" title="Move back to original list" onclick="moveBackToOriginal('${c.id}')">↩ Move back</button>`
+                          : (!showingAll
+                              ? `<button class="btn btn-out btn-sm" title="Move to Rotating List" onclick="moveToRotating('${c.id}')">🔁 Rotate</button>`
+                              : '')}
                       </td>
                     </tr>`;
                   }).join('')}
@@ -612,6 +653,47 @@
       try {
         await api('DELETE', `/lists/${listId}/members/${recipientId}`);
         toast('Removed from list');
+        refresh();
+      } catch (e) { toast(e.message, false); }
+    };
+
+    // ─── ClickUp sync + Rotating-list actions ───────────────────────────
+    // syncFromClickUp(): hits POST /api/clients-sync. The backend fetches
+    //   all active+onboarding clients from the ClickUp CRM, looks at each
+    //   client's assignees, and adds the client to whichever fixed list
+    //   (Luiza / Federico / Alejandra) matches the assignee. Existing
+    //   Rotating List memberships are NOT touched — moves are sticky.
+    // moveToRotating(id): pulls the client off their current manager list,
+    //   stores that list id as `original_list_id` on the recipient, and
+    //   adds them to the Rotating List.
+    // moveBackToOriginal(id): inverse — clears `original_list_id`, removes
+    //   from Rotating List, restores membership in the original manager list.
+    window.syncFromClickUp = async () => {
+      const btn = document.getElementById('sync-btn');
+      if (btn) { btn.disabled = true; btn.textContent = '🔄 Syncing…'; }
+      try {
+        const r = await api('POST', '/clients-sync');
+        toast(`Synced ${r.synced ?? 0} client${r.synced === 1 ? '' : 's'} from ClickUp${r.skipped ? ` (${r.skipped} skipped — no matching assignee)` : ''}`);
+        refresh();
+      } catch (e) {
+        toast('Sync failed: ' + e.message, false);
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '🔄 Sync from ClickUp'; }
+      }
+    };
+
+    window.moveToRotating = async (recipientId) => {
+      try {
+        await api('POST', `/recipients/${recipientId}/move-to-rotating`);
+        toast('Moved to Rotating List');
+        refresh();
+      } catch (e) { toast(e.message, false); }
+    };
+
+    window.moveBackToOriginal = async (recipientId) => {
+      try {
+        await api('POST', `/recipients/${recipientId}/move-back`);
+        toast('Moved back to original list');
         refresh();
       } catch (e) { toast(e.message, false); }
     };
@@ -752,42 +834,95 @@
     }
 
     // ── Settings ──────────────────────────────────────────────────────────
+    // The full team-members directory was removed from this page — it lives
+    // in the parent OS app's Settings, which is the source of truth. The
+    // Sender's Settings page now focuses on per-user preferences only:
+    //   - Theme (light / dark / system follow)
+    //   - Whoever's currently logged in (read from the parent OS session
+    //     when available, falls back to the first row of data.users)
+    const THEME_KEY = 'sender-theme';
+    function getTheme() {
+      const t = (localStorage.getItem(THEME_KEY) || 'light').toLowerCase();
+      return ['light','dark','system'].includes(t) ? t : 'light';
+    }
+    function applyTheme(t) {
+      const root = document.documentElement;
+      root.dataset.theme = t;
+      // For 'system', mirror the OS preference; for explicit choices, force
+      // the class so we override whatever the OS says.
+      const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      const effective = t === 'system' ? (prefersDark ? 'dark' : 'light') : t;
+      root.classList.toggle('theme-dark',  effective === 'dark');
+      root.classList.toggle('theme-light', effective === 'light');
+    }
+    function setTheme(t) {
+      localStorage.setItem(THEME_KEY, t);
+      applyTheme(t);
+      if (view === 'settings') renderPage();    // re-render so the active pill updates
+    }
+    // Apply saved theme on load (before any UI renders).
+    applyTheme(getTheme());
+
+    // Current user lookup. If the parent OS app passes one (via window.parent
+    // or postMessage in future), use that; otherwise pick the first row that
+    // looks like a logged-in user.
+    function getCurrentUser() {
+      // Future hook — replace with real auth lookup when wired up.
+      return data.users && data.users.length
+        ? data.users[0]
+        : { full_name: '—', email: '—', role: '—' };
+    }
+
     function renderSettings() {
+      const theme = getTheme();
+      const me = getCurrentUser();
+      const themeBtn = (id, label) => `
+        <button type="button"
+          class="px-3 py-1.5 text-xs rounded-md border ${theme === id ? 'bg-slate-900 text-white border-slate-900' : 'bg-white border-slate-200 hover:bg-slate-50'}"
+          onclick="setTheme('${id}')">${label}</button>`;
       return `
-        ${pageHeader('Settings', 'Users with access.')}
-        ${card(`
-          <div class="px-5 py-3 border-b border-slate-100">
-            <h3 class="text-sm font-semibold">Team members</h3>
-            <p class="text-xs text-ink-soft">${data.users.length} total</p>
-          </div>
-          ${data.users.length === 0
-            ? empty('No users yet', 'OS users will appear here once they sign in.')
-            : `<ul class="p-3 divide-y divide-slate-100">
-              ${data.users.map(u => `<li class="flex items-center justify-between py-3 first:pt-0 last:pb-0">
-                <div>
-                  <div class="text-sm font-medium">${esc(u.full_name || '—')}</div>
-                  <div class="text-xs text-ink-soft">${esc(u.email)}</div>
-                </div>
-                <span class="pill pill-neutral">${esc(u.role)}</span>
-              </li>`).join('')}
-            </ul>`}
-        `)}`;
+        ${pageHeader('Settings', 'Your preferences for the Sender bot.')}
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          ${card(`
+            <div class="px-5 py-4">
+              <h3 class="text-sm font-semibold mb-1">Appearance</h3>
+              <p class="text-xs text-ink-soft mb-3">Color scheme used across the Sender UI.</p>
+              <div class="flex gap-2">
+                ${themeBtn('light',  'Light')}
+                ${themeBtn('dark',   'Dark')}
+                ${themeBtn('system', 'System')}
+              </div>
+            </div>
+          `)}
+          ${card(`
+            <div class="px-5 py-4">
+              <h3 class="text-sm font-semibold mb-1">Your account</h3>
+              <p class="text-xs text-ink-soft mb-3">Signed in as:</p>
+              <div class="space-y-1">
+                <div class="text-sm font-medium">${esc(me.full_name || '—')}</div>
+                <div class="text-xs text-ink-soft">${esc(me.email || '—')}</div>
+                <div class="pt-2"><span class="pill pill-neutral">${esc(me.role || '—')}</span></div>
+              </div>
+            </div>
+          `)}
+        </div>`;
     }
 
     function renderPage() {
+      // upload-csv removed from the map — page no longer reachable from the
+      // nav. The renderUploadCsv() function is left defined below in case
+      // the team needs to restore it temporarily, but it's not wired up.
       const map = {
         'dashboard':       renderDashboard,
         'newsletters':     renderNewsletters,
         'monthly-reports': renderMonthlyReports,
         'client-lists':    renderClientLists,
         'templates':       renderTemplates,
-        'upload-csv':      renderUploadCsv,
         'send-queue':      renderSendQueue,
         'email-logs':      renderEmailLogs,
         'settings':        renderSettings,
       };
       $('#page').innerHTML = (map[view] || renderDashboard)();
-      if (view === 'upload-csv') wireCsv();
     }
 
     // ===========================================================================
