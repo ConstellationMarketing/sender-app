@@ -490,11 +490,20 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
       'active', 'onboarding', 'live',
       'hosting only', 'hosting-only', 'hosting_only', 'hosting',
     ]);
+    // hasRealEmail = the field has at least one address that matches the
+    // standard email shape. Placeholder values like "(no-email-clickup-…)"
+    // synthesized for emailless ClickUp clients fail this check and are
+    // silently filtered out of the send — they appear in the All Clients
+    // list but never receive emails until a real address is added in
+    // ClickUp and the team re-syncs.
+    const hasRealEmail = (s) =>
+      /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/.test(String(s || ''));
+
     recipients = (members || [])
       .map(m => m.recipient)
-      .filter(r => r && r.email && SENDABLE_STATUSES.has(String(r.status || '').toLowerCase()));
+      .filter(r => r && hasRealEmail(r.email) && SENDABLE_STATUSES.has(String(r.status || '').toLowerCase()));
 
-    if (!recipients.length) return bad(res, 400, 'No sendable recipients in this list (statuses checked: active / onboarding / live / hosting only)');
+    if (!recipients.length) return bad(res, 400, 'No sendable recipients in this list (statuses checked: active / onboarding / live / hosting only — must have a real email)');
   }
 
   await sb.from('sender_sends_batches').update({
