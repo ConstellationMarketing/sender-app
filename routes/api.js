@@ -28,16 +28,22 @@ function clean(obj, allowed) {
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
 // ─── Health ────────────────────────────────────────────────────────────────
+// Canonical health endpoint — see wiki/infra-health-protocol.md. Returns
+// { ok, ts, build, env } with env-var booleans only (never values). Probed
+// daily by the central health-check Worker for the green/yellow/red report.
+const BUILD_TAG = 'sender-2026-05-31';
 router.get('/health', (_req, res) => {
   res.json({
     ok: true,
     ts: Date.now(),
+    build: BUILD_TAG,
     env: {
       SUPABASE_URL:              !!process.env.SUPABASE_URL,
       SUPABASE_SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
       MAILGUN_API_KEY:           !!process.env.MAILGUN_API_KEY,
       MAILGUN_DOMAIN:            !!process.env.MAILGUN_DOMAIN,
       MAILGUN_FROM:              !!process.env.MAILGUN_FROM,
+      CLICKUP_API_KEY:           !!process.env.CLICKUP_API_KEY,
     },
   });
 });
