@@ -65,8 +65,10 @@ router.get('/snapshot', wrap(async (_req, res) => {
     sb.from('sender_logs_events').select('*').order('occurred_at', { ascending: false }).limit(200),
     sb.from('users_profiles').select('id, full_name, email, role').order('full_name', { ascending: true, nullsFirst: false }),
     // KPI counts everyone who could plausibly receive an email — same set
-    // the send loop uses (active / onboarding / live). Was just 'active'.
-    sb.from('sender_clients_recipients').select('id', { count: 'exact', head: true }).in('status', ['active', 'onboarding', 'live']),
+    // the send loop uses (active / onboarding / live / hosting only).
+    // Hosting-only clients need the email too — they're still active firm
+    // relationships even when we're not doing the full marketing stack.
+    sb.from('sender_clients_recipients').select('id', { count: 'exact', head: true }).in('status', ['active', 'onboarding', 'live', 'hosting only', 'hosting-only', 'hosting_only', 'hosting']),
     sb.from('sender_sends_emails').select('id', { count: 'exact', head: true }).eq('status', 'delivered').gte('sent_at', monthStart.toISOString()),
     sb.from('sender_sends_emails').select('id', { count: 'exact', head: true }).eq('status', 'failed').gte('created_at', monthStart.toISOString()),
     sb.from('sender_sends_batches').select('id', { count: 'exact', head: true }).eq('status', 'scheduled'),
@@ -484,12 +486,15 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
     // Statuses we'll actually send to. Was just 'active' — now includes
     // 'onboarding' and 'live' because the ClickUp CRM uses both, and the
     // monthly reports need to reach onboarding clients too.
-    const SENDABLE_STATUSES = new Set(['active', 'onboarding', 'live']);
+    const SENDABLE_STATUSES = new Set([
+      'active', 'onboarding', 'live',
+      'hosting only', 'hosting-only', 'hosting_only', 'hosting',
+    ]);
     recipients = (members || [])
       .map(m => m.recipient)
       .filter(r => r && r.email && SENDABLE_STATUSES.has(String(r.status || '').toLowerCase()));
 
-    if (!recipients.length) return bad(res, 400, 'No sendable recipients in this list (statuses checked: active / onboarding / live)');
+    if (!recipients.length) return bad(res, 400, 'No sendable recipients in this list (statuses checked: active / onboarding / live / hosting only)');
   }
 
   await sb.from('sender_sends_batches').update({
