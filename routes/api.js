@@ -115,7 +115,7 @@ async function syncListMemberships(sb, recipientId, listIds) {
 
 router.post('/recipients', wrap(async (req, res) => {
   const sb = getSupabase();
-  const row = clean(req.body || {}, ['name','email','firm','account_manager','status','tags']);
+  const row = clean(req.body || {}, ['name','email','firm','account_manager','status','tags','client_hub']);
   if (!row.name)  return bad(res, 400, 'name is required');
   if (!row.email) return bad(res, 400, 'email is required');
   if (!Array.isArray(row.tags)) delete row.tags;
@@ -129,7 +129,7 @@ router.post('/recipients', wrap(async (req, res) => {
 
 router.patch('/recipients/:id', wrap(async (req, res) => {
   const sb = getSupabase();
-  const row = clean(req.body || {}, ['name','email','firm','account_manager','status','tags']);
+  const row = clean(req.body || {}, ['name','email','firm','account_manager','status','tags','client_hub']);
   const { data, error } = await sb.from('sender_clients_recipients').update(row).eq('id', req.params.id).select().single();
   if (error) return bad(res, 400, error.message);
 
@@ -374,11 +374,12 @@ router.post('/batches/:id/test-send', wrap(async (req, res) => {
     email:           toEmails[0],
     firm:            'Test Firm LLP',
     account_manager: 'Test Manager',
+    client_hub:      'https://example.goconstellation.com/hub/test',
   };
   if (sampleRecipientId) {
     const { data: sample } = await sb
       .from('sender_clients_recipients')
-      .select('name, email, firm, account_manager')
+      .select('name, email, firm, account_manager, client_hub')
       .eq('id', sampleRecipientId)
       .single();
     if (sample) {
@@ -386,6 +387,7 @@ router.post('/batches/:id/test-send', wrap(async (req, res) => {
         name: sample.name, client_name: sample.name,
         email: toEmails[0],  // we still send to the test addresses, not the real one
         firm: sample.firm, account_manager: sample.account_manager,
+        client_hub: sample.client_hub || '',
       };
     }
   } else if (batch.audience_list_id) {
@@ -393,7 +395,7 @@ router.post('/batches/:id/test-send', wrap(async (req, res) => {
     // shows what a real send to that list would look like.
     const { data: members } = await sb
       .from('sender_clients_list_members')
-      .select('recipient:sender_clients_recipients(name, email, firm, account_manager, status)')
+      .select('recipient:sender_clients_recipients(name, email, firm, account_manager, status, client_hub)')
       .eq('list_id', batch.audience_list_id)
       .limit(5);
     const sample = (members || [])
@@ -404,6 +406,7 @@ router.post('/batches/:id/test-send', wrap(async (req, res) => {
         name: sample.name, client_name: sample.name,
         email: toEmails[0],
         firm: sample.firm, account_manager: sample.account_manager,
+        client_hub: sample.client_hub || '',
       };
     }
   }
@@ -579,6 +582,7 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
       email: addresses[0],          // for {{email}} merge var — use the first one
       firm: recipient.firm,
       account_manager: recipient.account_manager,
+      client_hub: recipient.client_hub || '',
     };
     const subject = applyMergeVars(tpl.subject || batch.name, mergeRow);
     const html    = applyMergeVars(tpl.body_html, mergeRow);
