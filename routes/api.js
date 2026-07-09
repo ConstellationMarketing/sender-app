@@ -6,7 +6,24 @@
 
 const express = require('express');
 const { getSupabase } = require('../lib/supabase');
-const { sendOne, applyMergeVars, ensureEnv: ensureMailgun } = require('../lib/mailgun');
+const { sendOne, applyMergeVars, ensureEnv: ensureMailgun, buildMergeRow } = require('../lib/mailgun');
+
+// Fetch the CRM `client` row matching a recipient name (case-insensitive).
+// Returns the row (with website, ga4_property_id, ahrefs_project_id) or null.
+// Silent on error — the send still works, just without CRM-joined merge vars.
+async function fetchCrmClientForRecipient(sb, recipientName) {
+  if (!recipientName) return null;
+  try {
+    const { data } = await sb
+      .from('client')
+      .select('website, ga4_property_id, ahrefs_project_id')
+      .ilike('name', String(recipientName).trim())
+      .maybeSingle();
+    return data || null;
+  } catch {
+    return null;
+  }
+}
 const { parseCsv } = require('../lib/csv');
 // fetchActiveClients now reads from the OS CRM's Supabase `client` table
 // (the source of truth ClickUp itself feeds into), so no new env vars are
@@ -368,27 +385,38 @@ router.post('/batches/:id/test-send', wrap(async (req, res) => {
   // OR from the first recipient on the audience list if available, OR
   // fall back to clearly-labeled placeholders so the test obviously isn't
   // pretending to be a real client.
-  let mergeRow = {
-    name:            'Test Recipient',
-    client_name:     'Test Recipient',
-    email:           toEmails[0],
-    firm:            'Test Firm LLP',
-    account_manager: 'Test Manager',
-    client_hub:      'https://example.goconstellation.com/hub/test',
-  };
+  // Build the merge row using the shared helper so ALL 22 variables are
+  // populated in the test-send preview + email. Overrides force the
+  // test-send email to be delivered to toEmails[0] even when the sample
+  // recipient row has a real client email — we don't want to accidentally
+  // send test copy to a live client.
+  let mergeRow = buildMergeRow({
+    recipient: {
+      name:            'Test Recipient',
+      email:           toEmails[0],
+      firm:            'Test Firm LLP',
+      account_manager: 'Test Manager',
+      status:          'live',
+      client_hub:      'https://example.goconstellation.com/hub/test',
+    },
+    batch,
+    crmClient: null,
+    overrides: { email: toEmails[0] },
+  });
   if (sampleRecipientId) {
     const { data: sample } = await sb
       .from('sender_clients_recipients')
-      .select('name, email, firm, account_manager, client_hub')
+      .select('name, email, firm, account_manager, status, client_hub')
       .eq('id', sampleRecipientId)
       .single();
     if (sample) {
-      mergeRow = {
-        name: sample.name, client_name: sample.name,
-        email: toEmails[0],  // we still send to the test addresses, not the real one
-        firm: sample.firm, account_manager: sample.account_manager,
-        client_hub: sample.client_hub || '',
-      };
+      const crmClient = await fetchCrmClientForRecipient(sb, sample.name);
+      mergeRow = buildMergeRow({
+        recipient: sample,
+        batch,
+        crmClient,
+        overrides: { email: toEmails[0] },  // still send to test addr
+      });
     }
   } else if (batch.audience_list_id) {
     // Grab the first active member of the audience list so the test email
@@ -402,12 +430,13 @@ router.post('/batches/:id/test-send', wrap(async (req, res) => {
       .map(m => m.recipient)
       .find(r => r && (r.status === 'active' || r.status === 'live' || r.status === 'onboarding'));
     if (sample) {
-      mergeRow = {
-        name: sample.name, client_name: sample.name,
-        email: toEmails[0],
-        firm: sample.firm, account_manager: sample.account_manager,
-        client_hub: sample.client_hub || '',
-      };
+      const crmClient = await fetchCrmClientForRecipient(sb, sample.name);
+      mergeRow = buildMergeRow({
+        recipient: sample,
+        batch,
+        crmClient,
+        overrides: { email: toEmails[0] },
+      });
     }
   }
 
@@ -576,14 +605,16 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
       continue;
     }
 
-    const mergeRow = {
-      name: recipient.name,
-      client_name: recipient.name,
-      email: addresses[0],          // for {{email}} merge var — use the first one
-      firm: recipient.firm,
-      account_manager: recipient.account_manager,
-      client_hub: recipient.client_hub || '',
-    };
+    // Full 22-variable merge row. Joins CRM client row by name for
+    // website / ga4_property_id / ahrefs_project_id. Empty strings if
+    // no CRM match — the template renders '' where those tags appear.
+    const crmClient = await fetchCrmClientForRecipient(sb, recipient.name);
+    const mergeRow  = buildMergeRow({
+      recipient,
+      batch,
+      crmClient,
+      overrides: { email: addresses[0] },   // in case recipient.email has multiple
+    });
     const subject = applyMergeVars(tpl.subject || batch.name, mergeRow);
     const html    = applyMergeVars(tpl.body_html, mergeRow);
 
