@@ -704,17 +704,17 @@
               // title tooltip; the verbose text was the main thing
               // pushing the table off-screen.
               return `<div class="overflow-x-auto">
-                <table class="w-full text-sm table-fixed">
+                <table class="w-full text-sm">
                   <thead><tr class="text-left text-[11px] uppercase tracking-wide text-ink-soft border-b border-slate-100 bg-slate-50/50">
-                    <th class="px-3 py-3 font-medium" style="width: 22%;">Client</th>
-                    <th class="px-3 py-3 font-medium" style="width: 26%;">Emails</th>
-                    <th class="px-3 py-3 font-medium" style="width: 82px;">Status</th>
-                    <th class="px-3 py-3 font-medium" style="width: 15%;">Client Hub</th>
+                    <th class="px-3 py-3 font-medium" style="width: 20%;">Client</th>
+                    <th class="px-3 py-3 font-medium" style="width: 24%;">Emails</th>
+                    <th class="px-3 py-3 font-medium" style="width: 80px; white-space: nowrap;">Status</th>
+                    <th class="px-3 py-3 font-medium" style="width: 140px; white-space: nowrap;">Client Hub</th>
                     ${isRotatingList
-                      ? `<th class="px-3 py-3 font-medium">Originally in</th>`
-                      : `<th class="px-3 py-3 font-medium">Lists</th>`}
-                    <th class="px-3 py-3 font-medium" style="width: 84px;">Last sent</th>
-                    <th class="px-2 py-3" style="width: 92px;"></th>
+                      ? `<th class="px-3 py-3 font-medium" style="white-space: nowrap;">Originally in</th>`
+                      : `<th class="px-3 py-3 font-medium" style="white-space: nowrap;">Lists</th>`}
+                    <th class="px-3 py-3 font-medium" style="width: 88px; white-space: nowrap;">Last sent</th>
+                    <th class="px-2 py-3" style="width: 88px;"></th>
                   </tr></thead><tbody>
                     ${visible.map(c => {
                       const myLists = listsByRecipient[c.id] || [];
