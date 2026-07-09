@@ -706,15 +706,15 @@
               return `<div class="overflow-x-auto">
                 <table class="w-full text-sm">
                   <thead><tr class="text-left text-[11px] uppercase tracking-wide text-ink-soft border-b border-slate-100 bg-slate-50/50">
-                    <th class="px-3 py-3 font-medium" style="width: 20%;">Client</th>
-                    <th class="px-3 py-3 font-medium" style="width: 24%;">Emails</th>
-                    <th class="px-3 py-3 font-medium" style="width: 80px; white-space: nowrap;">Status</th>
-                    <th class="px-3 py-3 font-medium" style="width: 140px; white-space: nowrap;">Client Hub</th>
+                    <th class="px-3 py-3 font-medium" style="width: 18%;">Client</th>
+                    <th class="px-3 py-3 font-medium" style="width: 22%;">Emails</th>
+                    <th class="px-3 py-3 font-medium" style="width: 68px; white-space: nowrap;">Status</th>
+                    <th class="px-3 py-3 font-medium" style="width: 110px; white-space: nowrap;">Client Hub</th>
                     ${isRotatingList
                       ? `<th class="px-3 py-3 font-medium" style="white-space: nowrap;">Originally in</th>`
                       : `<th class="px-3 py-3 font-medium" style="white-space: nowrap;">Lists</th>`}
-                    <th class="px-3 py-3 font-medium" style="width: 88px; white-space: nowrap;">Last sent</th>
-                    <th class="px-2 py-3" style="width: 88px;"></th>
+                    <th class="px-3 py-3 font-medium" style="width: 72px; white-space: nowrap;">Last sent</th>
+                    <th class="px-2 py-3" style="width: 60px;"></th>
                   </tr></thead><tbody>
                     ${visible.map(c => {
                       const myLists = listsByRecipient[c.id] || [];
@@ -732,7 +732,7 @@
                         <td class="px-3 py-3 align-top"><span class="pill pill-${esc(c.status)}">${esc(c.status)}</span></td>
                         <td class="px-3 py-3 align-top">
                           ${c.client_hub
-                            ? `<a href="${esc(c.client_hub)}" target="_blank" rel="noopener" class="text-xs text-brand-600 hover:underline break-all" title="${esc(c.client_hub)}">${esc(c.client_hub.replace(/^https?:\/\//, '').slice(0, 32))}${c.client_hub.length > 40 ? '…' : ''}</a>`
+                            ? `<a href="${esc(c.client_hub)}" target="_blank" rel="noopener" class="text-xs text-brand-600 hover:underline block truncate" style="max-width: 100px;" title="${esc(c.client_hub)}">${esc(c.client_hub.replace(/^https?:\/\//, ''))}</a>`
                             : '<span class="text-xs text-ink-soft">—</span>'}
                         </td>
                         ${isRotatingList
@@ -740,12 +740,12 @@
                           : `<td class="px-3 py-3 align-top">${myLists.length === 0 ? '<span class="text-xs text-ink-soft">—</span>' : `<div class="flex flex-wrap gap-1">${myLists.map(n => `<span class="pill pill-neutral">${esc(n)}</span>`).join('')}</div>`}</td>`}
                         <td class="px-3 py-3 text-ink-muted text-xs align-top">${c.last_emailed_at ? relTime(c.last_emailed_at) : 'never'}</td>
                         <td class="px-2 py-3 text-right align-top">
-                          <div class="flex justify-end gap-1">
-                            <button class="btn btn-out btn-sm" style="padding:4px 8px;" title="Edit Client Hub URL" onclick="editClientHub('${c.id}')">✏️</button>
+                          <div class="flex justify-end gap-0.5">
+                            <button class="btn btn-out btn-sm" style="padding:2px 6px;font-size:11px;" title="Edit Client Hub URL" onclick="editClientHub('${c.id}')">✏️</button>
                             ${isRotatingList
-                              ? `<button class="btn btn-out btn-sm" style="padding:4px 8px;" title="Move back to original list" onclick="moveBackToOriginal('${c.id}')">↩</button>`
+                              ? `<button class="btn btn-out btn-sm" style="padding:2px 6px;font-size:11px;" title="Move back to original list" onclick="moveBackToOriginal('${c.id}')">↩</button>`
                               : (!showingAll
-                                  ? `<button class="btn btn-out btn-sm" style="padding:4px 8px;" title="Move to Rotating List" onclick="moveToRotating('${c.id}')">🔁</button>`
+                                  ? `<button class="btn btn-out btn-sm" style="padding:2px 6px;font-size:11px;" title="Move to Rotating List" onclick="moveToRotating('${c.id}')">🔁</button>`
                                   : '')}
                           </div>
                         </td>
@@ -859,10 +859,12 @@
           { name: 'name', label: 'Name', required: true, value: existing?.name, placeholder: 'Monthly Report — Default' },
           { name: 'type', label: 'Type', type: 'select', required: true, value: existing?.type,
             options: [{ value: 'newsletter', label: 'Newsletter' }, { value: 'report', label: 'Monthly Report' }] },
-          { name: 'subject', label: 'Subject', value: existing?.subject, placeholder: 'Your April performance report' },
+          { name: 'subject', label: 'Subject', value: existing?.subject,
+            placeholder: 'Your April performance report — {{firm}}',
+            hint: 'Subject supports the same merge variables as the body. Example: "{{firm}} — April update"' },
           { name: 'body_html', label: 'Body (HTML)', type: 'textarea', rows: 10, value: existing?.body_html,
-            placeholder: '<p>Hi {{name}}, here is your monthly report…</p>',
-            hint: 'Merge variables: {{name}} {{email}} {{firm}} {{account_manager}}' },
+            placeholder: '<p>Hi {{name}}, here is your monthly report — <a href="{{client_hub}}">open your dashboard</a>.</p>',
+            hint: 'Available merge variables: {{name}} · {{firm}} · {{email}} · {{account_manager}} · {{client_hub}} — each substituted from the recipient\'s row at send time. Missing values render as empty strings.' },
         ],
         onSubmit: async (form) => {
           if (existing) await api('PATCH', `/templates/${existing.id}`, form);
@@ -887,6 +889,10 @@
       email:           'sample@firm.com',
       firm:            'Sample & Co. LLP',
       account_manager: 'Luiza Castro',
+      // Sample URL so the preview shows what {{client_hub}} would render
+      // as. At real send time this is replaced by the recipient's stored
+      // sender_clients_recipients.client_hub value.
+      client_hub:      'https://os.goconstellation.com/clients/sample-firm',
     };
     function applyMergeClient(text, row) {
       if (!text) return '';
