@@ -863,8 +863,8 @@
             placeholder: 'Your April performance report — {{firm}}',
             hint: 'Subject supports the same merge variables as the body. Example: "{{firm}} — April update"' },
           { name: 'body_html', label: 'Body (HTML)', type: 'textarea', rows: 10, value: existing?.body_html,
-            placeholder: '<p>Hi {{name}}, here is your monthly report — <a href="{{client_hub}}">open your dashboard</a>.</p>',
-            hint: 'Available merge variables: {{name}} · {{firm}} · {{email}} · {{account_manager}} · {{client_hub}} — each substituted from the recipient\'s row at send time. Missing values render as empty strings.' },
+            placeholder: '<p>Hi {{first_name}}, here is your {{current_month_year}} report from {{sender_first_name}} — <a href="{{client_hub}}">open your dashboard</a>.</p>',
+            hint: 'Client identity: {{name}} · {{first_name}} · {{firm}} · {{firm_short}} · {{email}} · {{account_manager}} · {{status}} · {{client_hub}} · {{website}} · {{ga4_property_id}} · {{ahrefs_project_id}} — Dates: {{today}} · {{today_short}} · {{current_month}} · {{current_month_year}} · {{last_month}} · {{last_month_year}} · {{current_year}} — Sender: {{sender_name}} · {{sender_first_name}} · {{sender_email}} — Constants: {{constellation}} · {{support_email}}' },
         ],
         onSubmit: async (form) => {
           if (existing) await api('PATCH', `/templates/${existing.id}`, form);
@@ -883,17 +883,47 @@
     // inside a sandboxed iframe so the template's own CSS can't leak into
     // the app shell. Shows the subject line above the iframe so the user
     // sees what a recipient would see in their inbox header.
-    const SAMPLE_MERGE = {
-      name:            'Sample Client',
-      client_name:     'Sample Client',
-      email:           'sample@firm.com',
-      firm:            'Sample & Co. LLP',
-      account_manager: 'Luiza Castro',
-      // Sample URL so the preview shows what {{client_hub}} would render
-      // as. At real send time this is replaced by the recipient's stored
-      // sender_clients_recipients.client_hub value.
-      client_hub:      'https://os.goconstellation.com/clients/sample-firm',
-    };
+    // Full sample data covering every merge variable the backend
+    // populates via buildMergeRow(). Kept in sync with lib/mailgun.js
+    // so the preview shows what a real recipient would see. Dates are
+    // computed live so the preview always reflects "today".
+    const SAMPLE_MERGE = (() => {
+      const now = new Date();
+      const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+      const last = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const twoDigit = (n) => String(n).padStart(2, '0');
+      return {
+        // Client identity
+        name:               'Sample Client',
+        first_name:         'Sample',
+        client_name:        'Sample Client',
+        firm:               'Sample & Co. LLP',
+        firm_short:         'Sample',
+        email:              'sample@firm.com',
+        status:             'live',
+        account_manager:    'Luiza Castro',
+        client_hub:         'https://os.goconstellation.com/clients/sample-firm',
+        // Dates (real, based on today)
+        today:              now.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }),
+        today_short:        `${twoDigit(now.getMonth()+1)}/${twoDigit(now.getDate())}/${now.getFullYear()}`,
+        current_month:      monthNames[now.getMonth()],
+        current_month_year: `${monthNames[now.getMonth()]} ${now.getFullYear()}`,
+        last_month:         monthNames[last.getMonth()],
+        last_month_year:    `${monthNames[last.getMonth()]} ${last.getFullYear()}`,
+        current_year:       String(now.getFullYear()),
+        // Sender identity
+        sender_name:        'Camila Parodi',
+        sender_first_name:  'Camila',
+        sender_email:       'camila@goconstellation.com',
+        // Constellation constants
+        constellation:      'Constellation Marketing',
+        support_email:      'support@goconstellation.com',
+        // Client dashboards (from CRM join at real send time)
+        website:            'https://samplefirm.com',
+        ga4_property_id:    '345678901',
+        ahrefs_project_id:  '2451234',
+      };
+    })();
     function applyMergeClient(text, row) {
       if (!text) return '';
       return String(text).replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_, k) => row[k] ?? `{{${k}}}`);
