@@ -706,14 +706,15 @@
               return `<div class="overflow-x-auto">
                 <table class="w-full text-sm table-fixed">
                   <thead><tr class="text-left text-[11px] uppercase tracking-wide text-ink-soft border-b border-slate-100 bg-slate-50/50">
-                    <th class="px-3 py-3 font-medium" style="width: 24%;">Client</th>
-                    <th class="px-3 py-3 font-medium" style="width: 32%;">Emails</th>
-                    <th class="px-3 py-3 font-medium" style="width: 88px;">Status</th>
+                    <th class="px-3 py-3 font-medium" style="width: 22%;">Client</th>
+                    <th class="px-3 py-3 font-medium" style="width: 26%;">Emails</th>
+                    <th class="px-3 py-3 font-medium" style="width: 82px;">Status</th>
+                    <th class="px-3 py-3 font-medium" style="width: 15%;">Client Hub</th>
                     ${isRotatingList
                       ? `<th class="px-3 py-3 font-medium">Originally in</th>`
                       : `<th class="px-3 py-3 font-medium">Lists</th>`}
-                    <th class="px-3 py-3 font-medium" style="width: 90px;">Last sent</th>
-                    <th class="px-2 py-3" style="width: 56px;"></th>
+                    <th class="px-3 py-3 font-medium" style="width: 84px;">Last sent</th>
+                    <th class="px-2 py-3" style="width: 92px;"></th>
                   </tr></thead><tbody>
                     ${visible.map(c => {
                       const myLists = listsByRecipient[c.id] || [];
@@ -729,16 +730,24 @@
                             : `<div class="space-y-1">${emails.map(e => `<a href="mailto:${esc(e)}" class="hover:underline block truncate" title="${esc(e)}">${esc(e)}</a>`).join('')}</div>`}
                         </td>
                         <td class="px-3 py-3 align-top"><span class="pill pill-${esc(c.status)}">${esc(c.status)}</span></td>
+                        <td class="px-3 py-3 align-top">
+                          ${c.client_hub
+                            ? `<a href="${esc(c.client_hub)}" target="_blank" rel="noopener" class="text-xs text-brand-600 hover:underline break-all" title="${esc(c.client_hub)}">${esc(c.client_hub.replace(/^https?:\/\//, '').slice(0, 32))}${c.client_hub.length > 40 ? '…' : ''}</a>`
+                            : '<span class="text-xs text-ink-soft">—</span>'}
+                        </td>
                         ${isRotatingList
                           ? `<td class="px-3 py-3 align-top">${originalList ? `<span class="pill pill-neutral">${esc(originalList.name)}</span>` : '<span class="text-xs text-ink-soft">—</span>'}</td>`
                           : `<td class="px-3 py-3 align-top">${myLists.length === 0 ? '<span class="text-xs text-ink-soft">—</span>' : `<div class="flex flex-wrap gap-1">${myLists.map(n => `<span class="pill pill-neutral">${esc(n)}</span>`).join('')}</div>`}</td>`}
                         <td class="px-3 py-3 text-ink-muted text-xs align-top">${c.last_emailed_at ? relTime(c.last_emailed_at) : 'never'}</td>
                         <td class="px-2 py-3 text-right align-top">
-                          ${isRotatingList
-                            ? `<button class="btn btn-out btn-sm" style="padding:4px 8px;" title="Move back to original list" onclick="moveBackToOriginal('${c.id}')">↩</button>`
-                            : (!showingAll
-                                ? `<button class="btn btn-out btn-sm" style="padding:4px 8px;" title="Move to Rotating List" onclick="moveToRotating('${c.id}')">🔁</button>`
-                                : '')}
+                          <div class="flex justify-end gap-1">
+                            <button class="btn btn-out btn-sm" style="padding:4px 8px;" title="Edit Client Hub URL" onclick="editClientHub('${c.id}')">✏️</button>
+                            ${isRotatingList
+                              ? `<button class="btn btn-out btn-sm" style="padding:4px 8px;" title="Move back to original list" onclick="moveBackToOriginal('${c.id}')">↩</button>`
+                              : (!showingAll
+                                  ? `<button class="btn btn-out btn-sm" style="padding:4px 8px;" title="Move to Rotating List" onclick="moveToRotating('${c.id}')">🔁</button>`
+                                  : '')}
+                          </div>
                         </td>
                       </tr>`;
                     }).join('')}
@@ -768,6 +777,37 @@
     //   adds them to the Rotating List.
     // moveBackToOriginal(id): inverse — clears `original_list_id`, removes
     //   from Rotating List, restores membership in the original manager list.
+    // editClientHub(recipientId): opens a modal to set/change the {{client_hub}}
+    // merge-tag value for one client. Blank input clears the field. The URL
+    // is stored in sender_clients_recipients.client_hub and is preserved
+    // through /api/clients-sync (which only touches name/email/firm/manager/status).
+    window.editClientHub = (id) => {
+      const c = data.recipients.find(r => r.id === id);
+      if (!c) { toast('Client not found', false); return; }
+      openModal({
+        title: `Client Hub URL — ${c.name}`,
+        submitLabel: 'Save',
+        fields: [
+          {
+            name: 'client_hub',
+            label: 'Client Hub URL',
+            type: 'url',
+            value: c.client_hub || '',
+            placeholder: 'https://os.goconstellation.com/clients/<slug>',
+            hint: 'This value populates the {{client_hub}} merge tag in email templates. Leave blank to clear.',
+          },
+        ],
+        onSubmit: async (form) => {
+          const url = String(form.client_hub || '').trim();
+          try {
+            await api('PATCH', `/recipients/${id}`, { client_hub: url });
+            toast(url ? 'Client Hub saved' : 'Client Hub cleared');
+            refresh();
+          } catch (e) { toast(e.message, false); }
+        },
+      });
+    };
+
     window.syncFromClickUp = async () => {
       const btn = document.getElementById('sync-btn');
       if (btn) { btn.disabled = true; btn.textContent = '🔄 Syncing…'; }
