@@ -11,15 +11,44 @@ const { sendOne, applyMergeVars, ensureEnv: ensureMailgun, buildMergeRow } = req
 // Fetch the CRM `client` row matching a recipient name (case-insensitive).
 // Returns the row (with website, ga4_property_id, ahrefs_project_id) or null.
 // Silent on error — the send still works, just without CRM-joined merge vars.
+// Fetch the "spr.metric_monthly.total_leads" for a client for the CURRENT
+// calendar month (YYYY-MM). Returns a number or null. Best-effort — a
+// missing row (e.g. this month hasn't been aggregated yet by the SPR
+// pipeline) or a Supabase hiccup just returns null so the {{leads}}
+// merge token renders empty in the email instead of breaking the send.
+async function fetchLeadsForClient(sb, clientId) {
+  if (!clientId) return null;
+  try {
+    const now = new Date();
+    const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const { data } = await sb
+      .schema('spr')
+      .from('metric_monthly')
+      .select('total_leads')
+      .eq('client_id', clientId)
+      .eq('month', month)
+      .maybeSingle();
+    return typeof data?.total_leads === 'number' ? data.total_leads : null;
+  } catch {
+    return null;
+  }
+}
+
 async function fetchCrmClientForRecipient(sb, recipientName) {
   if (!recipientName) return null;
   try {
     const { data } = await sb
       .from('client')
-      .select('website, ga4_property_id, ahrefs_project_id')
+      .select('id, website, ga4_property_id, ahrefs_project_id')
       .ilike('name', String(recipientName).trim())
       .maybeSingle();
-    return data || null;
+    if (!data) return null;
+    // Attach this month's total_leads (from spr.metric_monthly) so the
+    // {{leads}} merge tag can resolve without buildMergeRow having to
+    // become async. Absent data → null → renders as an empty string in
+    // the email, matching how every other CRM-joined field behaves.
+    const leads = await fetchLeadsForClient(sb, data.id);
+    return { ...data, leads };
   } catch {
     return null;
   }
