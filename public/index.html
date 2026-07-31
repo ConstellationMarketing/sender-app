@@ -631,6 +631,7 @@
       return `
         ${pageHeader('Client Lists', 'Auto-populated from ClickUp by account-manager assignee. Use the Rotating List to swap a client between managers.',
           `<div class="flex gap-2">
+            <button class="btn btn-out" onclick="openManageLists()" title="Turn auto-sync on/off per list, add a new manager list, rename or delete lists">⚙ Manage lists</button>
             <button class="btn btn-pri" onclick="syncFromClickUp()" id="sync-btn">🔄 Sync from ClickUp</button>
           </div>`)}
         <div class="grid grid-cols-1 lg:grid-cols-4 gap-4">
@@ -849,6 +850,117 @@
         toast('Moved back to original list');
         refresh();
       } catch (e) { toast(e.message, false); }
+    };
+
+    // ── Manage lists modal ────────────────────────────────────────────────
+    // Toggle is_fixed on/off per list, add a new fixed list, delete a list.
+    // No batch save — each row action hits the API immediately, so we hide
+    // the modal's submit button while the manage-lists view is open. The
+    // dialog's 'close' listener below restores it for other modals.
+
+    // Restore modal chrome to defaults every time the dialog closes, so a
+    // custom manage-lists view can't leak state into the next modal open.
+    modal.addEventListener('close', () => {
+      $('#modal-submit').style.display = '';
+      $('#modal-cancel').textContent = 'Cancel';
+    });
+
+    window.openManageLists = () => {
+      $('#modal-title').textContent = 'Manage lists';
+      $('#modal-submit').style.display = 'none';
+      $('#modal-cancel').textContent = 'Close';
+      modalSubmit = null;
+      renderManageListsBody();
+      modal.showModal();
+    };
+
+    function renderManageListsBody() {
+      const body = $('#modal-body');
+      const lists = (data.lists || []).slice().sort((a, b) => {
+        const ra = /rotating/i.test(a.name || '');
+        const rb = /rotating/i.test(b.name || '');
+        if (ra !== rb) return ra ? 1 : -1;     // rotating always last
+        if (!!b.is_fixed !== !!a.is_fixed) return (b.is_fixed ? 1 : 0) - (a.is_fixed ? 1 : 0);
+        return String(a.name).localeCompare(String(b.name));
+      });
+      body.innerHTML = `
+        <div class="text-xs text-ink-soft mb-3 leading-snug">
+          Turn <strong>Auto-sync</strong> on for each account-manager list. When you click
+          <strong>🔄 Sync from ClickUp</strong>, only auto-sync lists get their members refreshed
+          from the ClickUp Assignees field. Manual lists (like Rotating) are ignored by sync.
+        </div>
+        <div class="space-y-2">
+          ${lists.map(l => {
+            const isRotating = /rotating/i.test(l.name || '');
+            return `
+            <div class="flex items-center justify-between px-3 py-2 rounded-lg border border-slate-200 hover:bg-slate-50">
+              <div class="min-w-0 flex-1">
+                <div class="text-sm font-medium truncate">${isRotating ? '🔁 ' : ''}${esc(l.name)}</div>
+                ${isRotating
+                  ? `<div class="text-[10px] text-ink-soft italic">Manual list — auto-sync not applicable</div>`
+                  : `<div class="text-[10px] text-ink-soft">Matches ClickUp assignees whose name/email contains "${esc(l.name)}"</div>`}
+              </div>
+              <div class="flex items-center gap-3 ml-3">
+                ${isRotating
+                  ? `<span class="text-[11px] text-ink-soft">—</span>`
+                  : `<label class="flex items-center gap-1.5 text-xs cursor-pointer select-none">
+                       <input type="checkbox" ${l.is_fixed ? 'checked' : ''} onchange="toggleFixed('${l.id}', this.checked)" />
+                       Auto-sync
+                     </label>`}
+                <button type="button" class="text-slate-400 hover:text-red-600 text-sm" title="Delete list" onclick="deleteListFromManage('${l.id}', ${JSON.stringify(String(l.name || '')).replace(/"/g, '&quot;')})">🗑</button>
+              </div>
+            </div>`;
+          }).join('') || '<div class="text-xs text-ink-soft italic">No lists yet.</div>'}
+        </div>
+        <div class="mt-4 pt-3 border-t border-slate-100">
+          <div class="text-[11px] uppercase tracking-wide text-ink-soft font-semibold mb-2">Add a new auto-sync list</div>
+          <div class="flex gap-2">
+            <input id="new-list-name" type="text" placeholder="e.g. Maria"
+                   class="flex-1 px-3 py-1.5 rounded-lg border border-slate-200 text-sm"
+                   onkeydown="if(event.key==='Enter'){event.preventDefault();addFixedList();}" />
+            <button type="button" class="btn btn-pri" onclick="addFixedList()">+ Add</button>
+          </div>
+          <div class="mt-1 text-[10px] text-ink-soft">The name must match how the person appears in ClickUp (name or email local-part). Case-insensitive substring match.</div>
+        </div>
+      `;
+    }
+
+    window.toggleFixed = async (listId, checked) => {
+      try {
+        await api('PATCH', `/lists/${listId}`, { is_fixed: checked });
+        const l = (data.lists || []).find(x => x.id === listId);
+        if (l) l.is_fixed = checked;
+        toast(checked ? 'Auto-sync ON — will populate on next Sync' : 'Auto-sync OFF');
+      } catch (e) {
+        toast('Failed to update: ' + e.message, false);
+        renderManageListsBody();  // revert the checkbox visually
+      }
+    };
+
+    window.addFixedList = async () => {
+      const input = $('#new-list-name');
+      const name = (input?.value || '').trim();
+      if (!name) return toast('Enter a name', false);
+      if ((data.lists || []).some(l => (l.name || '').toLowerCase() === name.toLowerCase())) {
+        return toast('A list with that name already exists', false);
+      }
+      try {
+        const created = await api('POST', '/lists', { name, is_fixed: true });
+        data.lists.push(created);
+        toast(`Added "${name}". Click Sync from ClickUp to populate.`);
+        input.value = '';
+        renderManageListsBody();
+      } catch (e) { toast('Failed to add: ' + e.message, false); }
+    };
+
+    window.deleteListFromManage = async (listId, name) => {
+      if (!confirm(`Delete list "${name}"?\n\nMembers will be removed but the recipients themselves stay in the DB.`)) return;
+      try {
+        await api('DELETE', `/lists/${listId}`);
+        data.lists = (data.lists || []).filter(l => l.id !== listId);
+        toast('List deleted');
+        renderManageListsBody();
+      } catch (e) { toast('Failed to delete: ' + e.message, false); }
     };
 
     // ── Templates ─────────────────────────────────────────────────────────
