@@ -254,8 +254,12 @@ router.post('/recipients/import', wrap(async (req, res) => {
 // ─── Lists ─────────────────────────────────────────────────────────────────
 router.post('/lists', wrap(async (req, res) => {
   const sb = getSupabase();
-  const row = clean(req.body || {}, ['name','description','owner']);
+  const row = clean(req.body || {}, ['name','description','owner','is_fixed']);
   if (!row.name) return bad(res, 400, 'name is required');
+  // Default a helpful description when it's a fixed (auto-sync) list.
+  if (row.is_fixed && !row.description) {
+    row.description = `Auto-populated from ClickUp by assignee match on "${row.name}".`;
+  }
   const { data, error } = await sb.from('sender_clients_lists').insert(row).select().single();
   if (error) return bad(res, 400, error.message);
   res.status(201).json(data);
@@ -263,7 +267,7 @@ router.post('/lists', wrap(async (req, res) => {
 
 router.patch('/lists/:id', wrap(async (req, res) => {
   const sb = getSupabase();
-  const row = clean(req.body || {}, ['name','description','owner']);
+  const row = clean(req.body || {}, ['name','description','owner','is_fixed']);
   const { data, error } = await sb.from('sender_clients_lists').update(row).eq('id', req.params.id).select().single();
   if (error) return bad(res, 400, error.message);
   res.json(data);
@@ -710,15 +714,34 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
 
 // ─── ClickUp sync + Rotating List ──────────────────────────────────────────
 //
-// Four lists are treated as "fixed" in the new UI: Luiza, Federico,
-// Alejandra (account-manager lists, populated from ClickUp), and Rotating
-// List (where users manually shuffle clients between managers). The list
-// names are configurable via env, so a name change in the team doesn't
-// require a code edit. Defaults match what the spec asked for.
+// Each list row in sender_clients_lists has an `is_fixed` flag. Rows with
+// is_fixed=true are the account-manager lists — the sync auto-populates
+// them from ClickUp Assignees matching the list name. is_fixed=false lists
+// are manual (like the Rotating List).
+//
+// Managing the roster: use the ⚙ Manage lists button in the Sender UI to
+// toggle is_fixed on/off or add a new fixed list. When someone joins or
+// leaves CS, no code deploy is needed — just flip the toggle.
+//
+// The SENDER_FIXED_LISTS env var is a fallback used only when the DB has
+// zero is_fixed=true rows (bootstrap case). Once the migration seeds the
+// initial roster, the env var is ignored.
 
-const FIXED_LISTS = (process.env.SENDER_FIXED_LISTS || 'Luiza,Federico,Alejandra')
+const FALLBACK_FIXED_LISTS = (process.env.SENDER_FIXED_LISTS || 'Alejandra,Faith,Luiza')
   .split(',').map(s => s.trim()).filter(Boolean);
 const ROTATING_LIST_NAME = (process.env.SENDER_ROTATING_LIST_NAME || 'Rotating List').trim();
+
+// Load the current set of fixed-list names from the DB. Falls back to the
+// env var if nothing is flagged yet (first-run / pre-migration case).
+async function loadFixedListNames(sb) {
+  const { data, error } = await sb
+    .from('sender_clients_lists')
+    .select('name')
+    .eq('is_fixed', true);
+  if (error) throw new Error(`Could not load fixed lists: ${error.message}`);
+  const names = (data || []).map(r => r.name).filter(Boolean);
+  return names.length ? names : FALLBACK_FIXED_LISTS;
+}
 
 // Match a ClickUp assignee.username/email against an account-manager list
 // name. We match if the list name appears anywhere in the assignee's display
@@ -735,21 +758,26 @@ function assigneeMatchesList(assignee, listName) {
 }
 
 /**
- * Ensure the four fixed lists (three managers + Rotating) exist in
- * sender_clients_lists. Idempotent — safe to call before every sync. Returns
- * an object keyed by list name with the {id, ...} row.
+ * Ensure the manager lists (those with is_fixed=true) and the Rotating List
+ * exist in sender_clients_lists. Idempotent — safe to call before every sync.
+ * Returns an object keyed by list name with the {id, ...} row.
+ *
+ * `fixedNames` is loaded from the DB in the sync handler — this function
+ * just makes sure any name in that list has a corresponding row (creates one
+ * if missing, e.g. when the env fallback kicks in on a fresh install).
  */
-async function ensureFixedLists(sb) {
-  const wanted = [...FIXED_LISTS, ROTATING_LIST_NAME];
+async function ensureFixedLists(sb, fixedNames) {
+  const wanted = [...fixedNames, ROTATING_LIST_NAME];
   const { data: existing } = await sb
     .from('sender_clients_lists')
-    .select('id, name, owner, description')
+    .select('id, name, owner, description, is_fixed')
     .in('name', wanted);
   const byName = Object.fromEntries((existing || []).map(l => [l.name, l]));
 
   const toCreate = wanted.filter(n => !byName[n]).map(n => ({
     name: n,
     owner: n === ROTATING_LIST_NAME ? null : n,
+    is_fixed: n !== ROTATING_LIST_NAME,
     description: n === ROTATING_LIST_NAME
       ? 'Clients manually rotated off their default manager list. Move-back returns them to wherever they came from.'
       : `Auto-populated from ClickUp by assignee match on "${n}".`,
@@ -758,7 +786,7 @@ async function ensureFixedLists(sb) {
     const { data: created, error } = await sb
       .from('sender_clients_lists')
       .insert(toCreate)
-      .select('id, name, owner, description');
+      .select('id, name, owner, description, is_fixed');
     if (error) throw new Error(`Could not seed fixed lists: ${error.message}`);
     for (const row of (created || [])) byName[row.name] = row;
   }
@@ -771,7 +799,8 @@ async function ensureFixedLists(sb) {
 // are preserved — a sync doesn't yank someone back from the rotation.
 router.post('/clients-sync', wrap(async (_req, res) => {
   const sb = getSupabase();
-  const lists = await ensureFixedLists(sb);   // {name → list row}
+  const fixedNames = await loadFixedListNames(sb);
+  const lists = await ensureFixedLists(sb, fixedNames);   // {name → list row}
   const rotatingId = lists[ROTATING_LIST_NAME]?.id;
 
   let clients;
@@ -835,7 +864,7 @@ router.post('/clients-sync', wrap(async (_req, res) => {
 
     // Figure out which manager list(s) this client belongs in.
     const matchedListIds = [];
-    for (const managerName of FIXED_LISTS) {
+    for (const managerName of fixedNames) {
       const listRow = lists[managerName];
       if (!listRow) continue;
       if ((c.assignees || []).some(a => assigneeMatchesList(a, managerName))) {
@@ -845,7 +874,7 @@ router.post('/clients-sync', wrap(async (_req, res) => {
 
     // Wipe existing manager-list memberships (but keep Rotating intact —
     // already filtered above) and re-write them from the match set.
-    const managerListIds = FIXED_LISTS.map(n => lists[n]?.id).filter(Boolean);
+    const managerListIds = fixedNames.map(n => lists[n]?.id).filter(Boolean);
     if (managerListIds.length) {
       await sb.from('sender_clients_list_members')
         .delete()
@@ -874,7 +903,8 @@ router.post('/clients-sync', wrap(async (_req, res) => {
 router.post('/recipients/:id/move-to-rotating', wrap(async (req, res) => {
   const sb = getSupabase();
   const recipientId = req.params.id;
-  const lists = await ensureFixedLists(sb);
+  const fixedNames = await loadFixedListNames(sb);
+  const lists = await ensureFixedLists(sb, fixedNames);
   const rotatingId = lists[ROTATING_LIST_NAME]?.id;
   if (!rotatingId) return bad(res, 500, 'Rotating List not configured');
 
@@ -882,7 +912,7 @@ router.post('/recipients/:id/move-to-rotating', wrap(async (req, res) => {
   // before yanking them. If the client is in multiple manager lists (rare —
   // happens when someone is assigned to two managers in ClickUp), pick the
   // first one alphabetically — predictable, easy to reverse.
-  const managerListIds = FIXED_LISTS.map(n => lists[n]?.id).filter(Boolean);
+  const managerListIds = fixedNames.map(n => lists[n]?.id).filter(Boolean);
   const { data: currentMemberships } = await sb
     .from('sender_clients_list_members')
     .select('list_id')
@@ -892,7 +922,7 @@ router.post('/recipients/:id/move-to-rotating', wrap(async (req, res) => {
   let originalId = null;
   if ((currentMemberships || []).length) {
     const candidates = currentMemberships.map(m => m.list_id);
-    // sort by the FIXED_LISTS order, so "first alphabetically" really means
+    // sort by the fixedNames order, so "first alphabetically" really means
     // first in our configured fixed-list order.
     originalId = managerListIds.find(id => candidates.includes(id)) || candidates[0];
   }
@@ -929,7 +959,8 @@ router.post('/recipients/:id/move-to-rotating', wrap(async (req, res) => {
 router.post('/recipients/:id/move-back', wrap(async (req, res) => {
   const sb = getSupabase();
   const recipientId = req.params.id;
-  const lists = await ensureFixedLists(sb);
+  const fixedNames = await loadFixedListNames(sb);
+  const lists = await ensureFixedLists(sb, fixedNames);
   const rotatingId = lists[ROTATING_LIST_NAME]?.id;
 
   const { data: rec, error: recErr } = await sb
