@@ -456,7 +456,7 @@ router.post('/batches/:id/test-send', wrap(async (req, res) => {
     // shows what a real send to that list would look like.
     const { data: members } = await sb
       .from('sender_clients_list_members')
-      .select('recipient:sender_clients_recipients(name, email, firm, account_manager, status, client_hub)')
+      .select('recipient:sender_clients_recipients(name, email, reporting_email, firm, account_manager, status, client_hub)')
       .eq('list_id', batch.audience_list_id)
       .limit(5);
     const sample = (members || [])
@@ -570,9 +570,14 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
     const hasRealEmail = (s) =>
       /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/.test(String(s || ''));
 
+    // Effective send-to address: reporting_email (CRM override) wins
+    // over the sync'd .email (from ClickUp). Set via Account IDs in
+    // the OS CRM; dual-written by /crm-api/clients/:id/account-ids.
+    const sendToOf = (r) => (String(r?.reporting_email || '').trim() || String(r?.email || '').trim());
+
     recipients = (members || [])
       .map(m => m.recipient)
-      .filter(r => r && hasRealEmail(r.email) && SENDABLE_STATUSES.has(String(r.status || '').toLowerCase()));
+      .filter(r => r && hasRealEmail(sendToOf(r)) && SENDABLE_STATUSES.has(String(r.status || '').toLowerCase()));
 
     if (!recipients.length) return bad(res, 400, 'No sendable recipients in this list (statuses checked: active / onboarding / live / hosting only — must have a real email)');
   }
@@ -589,7 +594,9 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
   const queueRows = recipients.map(r => {
     const qr = {
       batch_id: batch.id,
-      recipient_email: r.email,
+      // Prefer reporting_email (CRM override) over the sync'd .email
+      // from ClickUp. sendToOf is defined above.
+      recipient_email: sendToOf(r),
       status: 'queued',
     };
     if (r.id) qr.recipient_id = r.id;
@@ -623,14 +630,16 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
   };
 
   for (const qi of queued) {
-    // Match by email — works for both real (id) and ad-hoc (id=null) rows,
+    // Match by the effective send-to (reporting_email override wins over
+    // sync'd email) — works for both real (id) and ad-hoc (id=null) rows,
     // since ad-hoc batches can have many recipients sharing the same null id.
-    const recipient = recipients.find(r => r.email === qi.recipient_email) || {};
-    const addresses = splitEmails(recipient.email);
+    const recipient = recipients.find(r => sendToOf(r) === qi.recipient_email) || {};
+    const effectiveTo = sendToOf(recipient);
+    const addresses = splitEmails(effectiveTo);
     if (!addresses.length) {
       // No valid email parsed — surface as a failure for this queue row.
       failed++;
-      failures.push({ email: recipient.email || '(empty)', reason: 'No valid email address could be parsed from this row' });
+      failures.push({ email: effectiveTo || '(empty)', reason: 'No valid email address could be parsed from this row' });
       await sb.from('sender_sends_emails').update({
         status: 'failed',
         error_message: 'No valid email parsed',
