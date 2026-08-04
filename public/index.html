@@ -720,7 +720,12 @@
                     ${visible.map(c => {
                       const myLists = listsByRecipient[c.id] || [];
                       const originalList = c.original_list_id ? listsById[c.original_list_id] : null;
-                      const emails = splitEmails(c.email);
+                      // Prefer the CRM's reporting_email override — same
+                      // resolution rule the send path uses. Empty override
+                      // falls back to the ClickUp-synced email column.
+                      const displayEmailStr = (c.reporting_email && String(c.reporting_email).trim()) || c.email;
+                      const emails = splitEmails(displayEmailStr);
+                      const usingOverride = !!(c.reporting_email && String(c.reporting_email).trim());
                       return `<tr class="border-b border-slate-100 last:border-0 hover:bg-slate-50/50">
                         <td class="px-3 py-3 font-medium align-top">
                           <div class="break-words" title="${esc(c.name)}">${esc(c.name)}</div>
@@ -728,7 +733,7 @@
                         <td class="px-3 py-3 text-ink-muted align-top">
                           ${emails.length === 0
                             ? '<span class="text-xs text-ink-soft">—</span>'
-                            : `<div class="space-y-1">${emails.map(e => `<a href="mailto:${esc(e)}" class="hover:underline block truncate" title="${esc(e)}">${esc(e)}</a>`).join('')}</div>`}
+                            : `<div class="space-y-1">${emails.map(e => `<a href="mailto:${esc(e)}" class="hover:underline block truncate" title="${esc(e)}">${esc(e)}</a>`).join('')}${usingOverride ? '<div class="text-[10px] text-emerald-600 mt-0.5" title="Reporting/Newsletter Email from OS CRM overrides ClickUp\'s Contact Email">from CRM override</div>' : ''}</div>`}
                         </td>
                         <td class="px-3 py-3 align-top"><span class="pill pill-${esc(c.status)}">${esc(c.status)}</span></td>
                         <td class="px-3 py-3 align-top">
