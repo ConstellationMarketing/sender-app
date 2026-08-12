@@ -530,6 +530,12 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
   //     for fake "clients", they don't show up in the Client Lists view.
   //  2. Saved audience list — read the members and filter by sendable status.
   let recipients = [];
+
+  // Effective send-to address: reporting_email (CRM override) wins over
+  // the ClickUp-synced .email. Hoisted here so BOTH the ad-hoc branch
+  // and the audience-list branch can call it (ad-hoc rows only have
+  // .email; audience-list rows can have either).
+  const sendToOf = (r) => (String(r?.reporting_email || '').trim() || String(r?.email || '').trim());
   if (batch.ad_hoc_recipients && String(batch.ad_hoc_recipients).trim()) {
     const matches = String(batch.ad_hoc_recipients).match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || [];
     const seen = new Set();
@@ -570,11 +576,6 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
     // ClickUp and the team re-syncs.
     const hasRealEmail = (s) =>
       /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/.test(String(s || ''));
-
-    // Effective send-to address: reporting_email (CRM override) wins
-    // over the sync'd .email (from ClickUp). Set via Account IDs in
-    // the OS CRM; dual-written by /crm-api/clients/:id/account-ids.
-    const sendToOf = (r) => (String(r?.reporting_email || '').trim() || String(r?.email || '').trim());
 
     recipients = (members || [])
       .map(m => m.recipient)
