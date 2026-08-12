@@ -60,6 +60,17 @@ const { parseCsv } = require('../lib/csv');
 const { fetchActiveClients } = require('../lib/crm');
 const { runAssigneeSync } = require('../lib/assignee-sync');
 
+// HTML-escape helper used by the test-send banner (line ~481) and
+// anywhere else we drop dynamic strings into an HTML payload.
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 const router = express.Router();
 
 function bad(res, status, error) {
