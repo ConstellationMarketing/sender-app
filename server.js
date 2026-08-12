@@ -62,3 +62,25 @@ app.get(/^(?!\/api).*/, (_req, res) => {
 app.listen(PORT, () => {
   console.log(`[sender] listening on http://localhost:${PORT}`);
 });
+
+
+// ── Assignee auto-sync ──────────────────────────────────────────
+// Every 15 minutes, reconcile Sender's Luiza/Alejandra/Faith lists
+// against the OS CRM (ClickUp Client Info list). Only touches those 3
+// lists; everything else is left alone. See lib/assignee-sync.js.
+try {
+  const { runAssigneeSync } = require('./lib/assignee-sync');
+  const RUN_INTERVAL_MS = 15 * 60 * 1000;
+  const tick = () => {
+    runAssigneeSync()
+      .then(r => console.log('[sender] assignee-sync ok:', JSON.stringify(r.counters)))
+      .catch(err => console.error('[sender] assignee-sync failed:', err.message));
+  };
+  // Kick one immediately so the VPS has fresh data right after deploy,
+  // then let the timer take over.
+  setTimeout(tick, 30 * 1000);
+  setInterval(tick, RUN_INTERVAL_MS);
+  console.log(`[sender] assignee-sync scheduled every ${RUN_INTERVAL_MS / 60000} min`);
+} catch (e) {
+  console.warn('[sender] assignee-sync scheduler not started:', e.message);
+}

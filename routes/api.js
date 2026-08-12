@@ -58,6 +58,7 @@ const { parseCsv } = require('../lib/csv');
 // (the source of truth ClickUp itself feeds into), so no new env vars are
 // needed beyond the Supabase keys the app already has.
 const { fetchActiveClients } = require('../lib/crm');
+const { runAssigneeSync } = require('../lib/assignee-sync');
 
 const router = express.Router();
 
@@ -1007,5 +1008,14 @@ router.post('/recipients/:id/move-back', wrap(async (req, res) => {
 
   res.json({ ok: true, restored_to_list_id: targetListId });
 }));
+
+// POST /api/sync-assignees — trigger the CRM assignee reconciliation.
+// Also called every N minutes by the timer in server.js. Idempotent.
+router.post('/sync-assignees', async (_req, res, next) => {
+  try {
+    const result = await runAssigneeSync();
+    res.json(result);
+  } catch (e) { next(e); }
+});
 
 module.exports = router;
