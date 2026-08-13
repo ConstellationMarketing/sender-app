@@ -504,32 +504,33 @@ router.post('/batches/:id/test-send', wrap(async (req, res) => {
   // real send. send_email_id and batch_id are left null: no queue row
   // exists for a test-send, and the audience batch stays untouched (that's
   // still the whole point of test-send being a "dry-run side-channel").
+  // Small helper — Supabase-js .insert() does NOT throw on constraint
+  // violations, it returns { data, error }. We were relying on try/catch,
+  // which meant every log-row failure was invisible. Wrap it so we
+  // actually surface the message to pm2 logs.
+  async function logTestEvent(addr, meta) {
+    try {
+      const { error } = await sb.from('sender_logs_events').insert({
+        type: 'test',
+        recipient_email: addr,
+        meta,
+      });
+      if (error) {
+        console.warn('test-send: log insert failed:', error.message, error.details || '');
+      }
+    } catch (thrown) {
+      console.warn('test-send: log insert threw:', thrown?.message || thrown);
+    }
+  }
   const results = [];
   for (const addr of toEmails) {
     try {
       const out = await sendOne({ to: addr, subject, html });
       results.push({ to: addr, ok: true, id: out?.id || null });
-      try {
-        await sb.from('sender_logs_events').insert({
-          type: 'test',
-          recipient_email: addr,
-          meta: `(test only) — merged from ${mergeRow.name || 'test recipient'}`,
-        });
-      } catch (logErr) {
-        // Never let a log-row failure kill the test-send flow.
-        console.warn('test-send: log insert failed:', logErr?.message || logErr);
-      }
+      await logTestEvent(addr, `(test only) — merged from ${mergeRow.name || 'test recipient'}`);
     } catch (e) {
       results.push({ to: addr, ok: false, error: String(e.message || e).slice(0, 500) });
-      try {
-        await sb.from('sender_logs_events').insert({
-          type: 'test',
-          recipient_email: addr,
-          meta: `(test only) — FAILED: ${String(e.message || e).slice(0, 200)}`,
-        });
-      } catch (logErr) {
-        console.warn('test-send: log insert failed:', logErr?.message || logErr);
-      }
+      await logTestEvent(addr, `(test only) — FAILED: ${String(e.message || e).slice(0, 200)}`);
     }
   }
   const okCount   = results.filter(r => r.ok).length;
