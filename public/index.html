@@ -376,6 +376,11 @@
     function batchModal(type, existing = null) {
       const isReport = type === 'report';
       const templates = data.templates.filter(t => isReport ? t.type === 'report' : t.type === 'newsletter');
+      // "All Clients (Live + Onboarding + Hosting)" is newsletter-only —
+      // Hosting clients get the newsletter but NOT the monthly report,
+      // so hide any list flagged newsletter_only=true from the Monthly
+      // Reports modal.
+      const audienceLists = data.lists.filter(l => isReport ? !l.newsletter_only : true);
       openModal({
         title: existing ? `Edit ${isReport ? 'report' : 'newsletter'}` : `New ${isReport ? 'monthly report' : 'newsletter'}`,
         fields: [
@@ -384,7 +389,7 @@
           // At least one must be filled; the backend send loop honors
           // ad_hoc_recipients first if present, otherwise uses the list.
           { name: 'audience_list_id', label: 'Audience list', type: 'select', value: existing?.audience_list_id,
-            options: [{ value: '', label: '— pick a list (or leave blank and type recipients below) —' }, ...data.lists.map(l => ({ value: l.id, label: l.name }))] },
+            options: [{ value: '', label: '— pick a list (or leave blank and type recipients below) —' }, ...audienceLists.map(l => ({ value: l.id, label: l.name }))] },
           { name: 'ad_hoc_recipients', label: 'Or type recipients (for testing)', type: 'textarea', rows: 3,
             value: existing?.ad_hoc_recipients || '',
             placeholder: 'omar@goconstellation.com, luiza@goconstellation.com',
