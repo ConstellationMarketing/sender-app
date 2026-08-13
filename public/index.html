@@ -376,11 +376,14 @@
     function batchModal(type, existing = null) {
       const isReport = type === 'report';
       const templates = data.templates.filter(t => isReport ? t.type === 'report' : t.type === 'newsletter');
-      // "All Clients (Live + Onboarding + Hosting)" is newsletter-only —
-      // Hosting clients get the newsletter but NOT the monthly report,
-      // so hide any list flagged newsletter_only=true from the Monthly
-      // Reports modal.
-      const audienceLists = data.lists.filter(l => isReport ? !l.newsletter_only : true);
+      // Two "All Clients" lists share a display name but differ by scope
+      // via report_only / newsletter_only flags. Each modal shows only
+      // the one whose scope matches:
+      //   • Monthly Reports → hide newsletter_only (keep report_only + neutral)
+      //   • Newsletter      → hide report_only (keep newsletter_only + neutral)
+      const audienceLists = data.lists.filter(l =>
+        isReport ? !l.newsletter_only : !l.report_only,
+      );
       openModal({
         title: existing ? `Edit ${isReport ? 'report' : 'newsletter'}` : `New ${isReport ? 'monthly report' : 'newsletter'}`,
         fields: [
