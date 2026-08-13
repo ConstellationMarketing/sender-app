@@ -777,7 +777,7 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
 // zero is_fixed=true rows (bootstrap case). Once the migration seeds the
 // initial roster, the env var is ignored.
 
-const FALLBACK_FIXED_LISTS = (process.env.SENDER_FIXED_LISTS || 'Alejandra,Faith,Luiza')
+const FALLBACK_FIXED_LISTS = (process.env.SENDER_FIXED_LISTS || 'Alejandra,Faith,Luiza,Maria')
   .split(',').map(s => s.trim()).filter(Boolean);
 const ROTATING_LIST_NAME = (process.env.SENDER_ROTATING_LIST_NAME || 'Rotating List').trim();
 
