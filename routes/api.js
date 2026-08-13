@@ -496,13 +496,40 @@ router.post('/batches/:id/test-send', wrap(async (req, res) => {
 
   // Send to each test address. Don't bail on first failure — we want a
   // per-address breakdown so the user can tell which inbox didn't get it.
+  //
+  // We ALSO write a row into sender_logs_events for each test address so the
+  // Email Logs page shows every event — including tests — with a clearly
+  // distinct "test" pill and a "(test only)" meta line. That way the person
+  // who fired the test can confirm it went out without pretending it was a
+  // real send. send_email_id and batch_id are left null: no queue row
+  // exists for a test-send, and the audience batch stays untouched (that's
+  // still the whole point of test-send being a "dry-run side-channel").
   const results = [];
   for (const addr of toEmails) {
     try {
       const out = await sendOne({ to: addr, subject, html });
       results.push({ to: addr, ok: true, id: out?.id || null });
+      try {
+        await sb.from('sender_logs_events').insert({
+          type: 'test',
+          recipient_email: addr,
+          meta: `(test only) — merged from ${mergeRow.name || 'test recipient'}`,
+        });
+      } catch (logErr) {
+        // Never let a log-row failure kill the test-send flow.
+        console.warn('test-send: log insert failed:', logErr?.message || logErr);
+      }
     } catch (e) {
       results.push({ to: addr, ok: false, error: String(e.message || e).slice(0, 500) });
+      try {
+        await sb.from('sender_logs_events').insert({
+          type: 'test',
+          recipient_email: addr,
+          meta: `(test only) — FAILED: ${String(e.message || e).slice(0, 200)}`,
+        });
+      } catch (logErr) {
+        console.warn('test-send: log insert failed:', logErr?.message || logErr);
+      }
     }
   }
   const okCount   = results.filter(r => r.ok).length;
