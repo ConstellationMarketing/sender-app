@@ -1190,22 +1190,104 @@
     }
 
     // ── Email Logs ────────────────────────────────────────────────────────
+    //
+    // Adds a Failed-only filter tab + per-row checkboxes + a "Retry
+    // selected" button that POSTs to /api/logs/retry. Retry re-resolves
+    // the batch/template/recipient and re-sends via Mailgun, writes a
+    // new log event with a "(retry)" meta prefix so the outcome shows
+    // up in the same feed.
+    let logsFilter    = 'all';
+    let selectedLogs  = new Set();
+    let retryRunning  = false;
     function renderEmailLogs() {
+      const filtered = data.logs.filter(l =>
+        logsFilter === 'failed' ? l.type === 'failed' : true,
+      );
+      const failedCount = data.logs.filter(l => l.type === 'failed').length;
+      const selectedFailed = filtered.filter(l => l.type === 'failed' && selectedLogs.has(l.id));
+      const canRetry = selectedFailed.length > 0 && !retryRunning;
       return `
         ${pageHeader('Email Logs', 'Timeline of every email event.')}
-        ${card(data.logs.length === 0
-          ? empty('No events yet', 'Sent, opened, clicked, and bounced events will appear here.')
+        <div class="flex items-center justify-between mb-3 gap-3 flex-wrap">
+          <div class="flex items-center gap-2">
+            <button class="btn ${logsFilter === 'all' ? 'btn-pri' : 'btn-out'} btn-sm" onclick="setLogsFilter('all')">All (${data.logs.length})</button>
+            <button class="btn ${logsFilter === 'failed' ? 'btn-pri' : 'btn-out'} btn-sm" onclick="setLogsFilter('failed')">Failed (${failedCount})</button>
+          </div>
+          <div class="flex items-center gap-2">
+            ${logsFilter === 'failed' && failedCount > 0
+              ? `<button class="btn btn-out btn-sm" onclick="toggleAllFailed()">${selectedFailed.length === failedCount ? 'Clear' : 'Select all failed'}</button>` : ''}
+            <button class="btn btn-pri btn-sm" ${canRetry ? '' : 'disabled'} onclick="retrySelectedLogs()">
+              ${retryRunning ? 'Retrying…' : `Retry selected (${selectedFailed.length})`}
+            </button>
+          </div>
+        </div>
+        ${card(filtered.length === 0
+          ? empty(logsFilter === 'failed' ? 'No failed sends' : 'No events yet',
+                  logsFilter === 'failed' ? 'Everything sent has been delivered — nothing to retry.'
+                                          : 'Sent, opened, clicked, and bounced events will appear here.')
           : `<ul class="p-3 divide-y divide-slate-100">
-            ${data.logs.map(l => `<li class="flex items-start gap-3 py-2.5 first:pt-0 last:pb-0">
-              <span class="pill pill-${esc(l.type)} mt-0.5">${esc(l.type)}</span>
-              <div class="flex-1">
-                <div class="text-sm">${esc(l.recipient_email || '—')}</div>
-                ${l.meta ? `<div class="text-xs text-ink-soft truncate">${esc(l.meta)}</div>` : ''}
-              </div>
-              <div class="text-xs text-ink-soft whitespace-nowrap">${relTime(l.occurred_at)}</div>
-            </li>`).join('')}
+            ${filtered.map(l => {
+              const isFailed = l.type === 'failed';
+              const checked  = selectedLogs.has(l.id);
+              return `<li class="flex items-start gap-3 py-2.5 first:pt-0 last:pb-0">
+                ${isFailed
+                  ? `<input type="checkbox" class="mt-1 h-4 w-4 shrink-0 accent-indigo-600 cursor-pointer" ${checked ? 'checked' : ''} onchange="toggleLog('${esc(l.id)}')" title="Select to retry" />`
+                  : '<span class="w-4 shrink-0"></span>'}
+                <span class="pill pill-${esc(l.type)} mt-0.5">${esc(l.type)}</span>
+                <div class="flex-1">
+                  <div class="text-sm">${esc(l.recipient_email || '—')}</div>
+                  ${l.meta ? `<div class="text-xs text-ink-soft truncate">${esc(l.meta)}</div>` : ''}
+                </div>
+                <div class="text-xs text-ink-soft whitespace-nowrap">${relTime(l.occurred_at)}</div>
+              </li>`;
+            }).join('')}
           </ul>`)}`;
     }
+    function setLogsFilter(f) {
+      logsFilter = f;
+      selectedLogs.clear();
+      renderPage();
+    }
+    function toggleLog(id) {
+      if (selectedLogs.has(id)) selectedLogs.delete(id);
+      else selectedLogs.add(id);
+      renderPage();
+    }
+    function toggleAllFailed() {
+      const failedIds = data.logs.filter(l => l.type === 'failed').map(l => l.id);
+      const allSelected = failedIds.every(id => selectedLogs.has(id));
+      if (allSelected) failedIds.forEach(id => selectedLogs.delete(id));
+      else             failedIds.forEach(id => selectedLogs.add(id));
+      renderPage();
+    }
+    async function retrySelectedLogs() {
+      const ids = [...selectedLogs];
+      if (!ids.length) return;
+      retryRunning = true;
+      renderPage();
+      try {
+        const r = await fetch('/api/logs/retry', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ log_ids: ids }),
+        });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+        alert(`Retry finished — ${j.retried} sent, ${j.failed} failed, ${j.skipped} skipped.`);
+        selectedLogs.clear();
+        await refresh();
+      } catch (err) {
+        alert(`Retry failed: ${err.message}`);
+      } finally {
+        retryRunning = false;
+        renderPage();
+      }
+    }
+    // Expose for onclick handlers.
+    window.setLogsFilter     = setLogsFilter;
+    window.toggleLog         = toggleLog;
+    window.toggleAllFailed   = toggleAllFailed;
+    window.retrySelectedLogs = retrySelectedLogs;
 
     // ── Settings ──────────────────────────────────────────────────────────
     // The full team-members directory was removed from this page — it lives
