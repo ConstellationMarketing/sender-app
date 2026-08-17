@@ -1058,4 +1058,167 @@ router.post('/sync-assignees', async (_req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// ── Retry failed sends ────────────────────────────────────────────────────
+// POST /api/logs/retry with body { log_ids: [uuid, uuid, ...] }
+//
+// Called from the Email Logs page after Omar picks which failed rows to
+// resend (e.g. after fixing DMARC / lifting a Mailgun cap). For each log
+// row:
+//   1. Load the log event → get its send_email_id
+//   2. Load the sender_sends_emails row → get batch_id + recipient_id
+//   3. Load the batch and its template
+//   4. Resolve the recipient (either the recipient_id row or a fallback
+//      to the recipient_email column for ad-hoc test rows)
+//   5. Rebuild the full 22-key mergeRow via buildMergeRow (same helper
+//      the real send loop uses), apply merge vars to subject + html,
+//      call sendOne() to Mailgun.
+//   6. Write a new sender_logs_events row — type=sent or type=failed
+//      (with a "(retry)" prefix in meta so the log clearly shows this
+//      was a re-send, not the original).
+//
+// Best-effort per row: one failure doesn't abort the batch.
+router.post('/logs/retry', wrap(async (req, res) => {
+  const sb = getSupabase();
+  ensureMailgun();
+
+  const logIds = Array.isArray(req.body?.log_ids) ? req.body.log_ids : [];
+  if (!logIds.length) return bad(res, 400, 'log_ids required');
+  if (logIds.length > 200) return bad(res, 400, 'max 200 rows per retry');
+
+  const { data: logs, error: logsErr } = await sb
+    .from('sender_logs_events')
+    .select('id, send_email_id, batch_id, type, recipient_email')
+    .in('id', logIds);
+  if (logsErr) return bad(res, 500, `logs fetch: ${logsErr.message}`);
+  if (!logs?.length) return bad(res, 404, 'no matching log rows');
+
+  // Cache per (batch, send_email) so we don't re-query for repeat lookups.
+  const batchCache    = new Map(); // id → { batch, template }
+  const sendCache     = new Map(); // id → sender_sends_emails row
+  const recipientCache = new Map(); // id → sender_clients_recipients row
+
+  async function loadBatch(id) {
+    if (batchCache.has(id)) return batchCache.get(id);
+    const [{ data: b }, ] = await Promise.all([
+      sb.from('sender_sends_batches').select('*').eq('id', id).single(),
+    ]);
+    let t = null;
+    if (b?.template_id) {
+      const { data } = await sb
+        .from('sender_templates_emails').select('*').eq('id', b.template_id).single();
+      t = data;
+    }
+    const pair = { batch: b, template: t };
+    batchCache.set(id, pair);
+    return pair;
+  }
+  async function loadSend(id) {
+    if (!id) return null;
+    if (sendCache.has(id)) return sendCache.get(id);
+    const { data } = await sb
+      .from('sender_sends_emails').select('*').eq('id', id).single();
+    sendCache.set(id, data);
+    return data;
+  }
+  async function loadRecipient(id) {
+    if (!id) return null;
+    if (recipientCache.has(id)) return recipientCache.get(id);
+    const { data } = await sb
+      .from('sender_clients_recipients')
+      .select('id, name, email, reporting_email, firm, account_manager, status, client_hub, tags')
+      .eq('id', id).single();
+    recipientCache.set(id, data);
+    return data;
+  }
+
+  const results = [];
+  for (const log of logs) {
+    const outcome = { log_id: log.id, recipient_email: log.recipient_email, ok: false };
+    try {
+      // For test-send rows (send_email_id null) we can't reliably reconstruct
+      // the original body — surface as skipped instead of silently failing.
+      if (!log.send_email_id) {
+        outcome.skipped = 'test-send row — no template context to rebuild';
+        results.push(outcome);
+        continue;
+      }
+      const send = await loadSend(log.send_email_id);
+      if (!send) { outcome.error = 'send row not found'; results.push(outcome); continue; }
+      const { batch, template } = await loadBatch(send.batch_id);
+      if (!batch || !template) {
+        outcome.error = 'batch or template missing';
+        results.push(outcome);
+        continue;
+      }
+      // Try to load the saved recipient row for full merge fidelity. Fall
+      // back to a minimal shim built from recipient_email if the row is
+      // gone (ad-hoc send, deleted client, etc.).
+      let recipient = send.recipient_id
+        ? await loadRecipient(send.recipient_id)
+        : null;
+      if (!recipient) {
+        recipient = {
+          name:  '',
+          email: log.recipient_email,
+          firm:  '',
+          account_manager: '',
+          status: 'live',
+          client_hub: '',
+        };
+      }
+      const crmClient = await fetchCrmClientForRecipient(sb, recipient.name);
+      const mergeRow  = buildMergeRow({
+        recipient,
+        batch,
+        crmClient,
+        overrides: { email: log.recipient_email }, // send to the exact original addr
+      });
+      const subject = applyMergeVars(template.subject || batch.name, mergeRow);
+      const html    = applyMergeVars(template.body_html || '', mergeRow);
+
+      await sendOne({ to: log.recipient_email, subject, html });
+      outcome.ok = true;
+      await sb.from('sender_logs_events').insert({
+        send_email_id: send.id,
+        batch_id: batch.id,
+        type: 'sent',
+        recipient_email: log.recipient_email,
+        meta: `(retry) resent from log ${log.id}`,
+      });
+      // Also flip the queue row back to delivered if it was failed.
+      if (send.status === 'failed') {
+        await sb.from('sender_sends_emails').update({
+          status: 'delivered',
+          sent_at: new Date().toISOString(),
+          error_message: null,
+        }).eq('id', send.id);
+      }
+    } catch (err) {
+      outcome.error = String(err?.message || err).slice(0, 500);
+      // Best-effort log the retry failure too so the Email Logs page shows
+      // the outcome directly instead of a phantom silent skip.
+      try {
+        await sb.from('sender_logs_events').insert({
+          send_email_id: log.send_email_id,
+          batch_id: log.batch_id,
+          type: 'failed',
+          recipient_email: log.recipient_email,
+          meta: `(retry) failed: ${outcome.error.slice(0, 200)}`,
+        });
+      } catch { /* keep going */ }
+    }
+    results.push(outcome);
+  }
+  const okCount   = results.filter(r => r.ok).length;
+  const failCount = results.filter(r => !r.ok && !r.skipped).length;
+  const skipCount = results.filter(r => r.skipped).length;
+  return res.json({
+    ok: failCount === 0,
+    retried:  okCount,
+    failed:   failCount,
+    skipped:  skipCount,
+    results,
+  });
+}));
+
 module.exports = router;
