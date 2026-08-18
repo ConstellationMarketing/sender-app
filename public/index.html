@@ -1199,25 +1199,48 @@
     let logsFilter    = 'all';
     let selectedLogs  = new Set();
     let retryRunning  = false;
+    let deleteRunning = false;
     function renderEmailLogs() {
-      const filtered = data.logs.filter(l =>
+      // Dedupe by (recipient_email, type) — keep the NEWEST entry per
+      // pair. Fixes the pile-up where every retry against a persistent
+      // Mailgun error left the previous failed row in place, ballooning
+      // the Failed count. data.logs is already sorted newest-first by
+      // the API, so the first occurrence we see wins.
+      const seen = new Set();
+      const deduped = [];
+      for (const l of data.logs) {
+        const key = `${(l.recipient_email || '').toLowerCase()}|${l.type}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        deduped.push(l);
+      }
+      const filtered = deduped.filter(l =>
         logsFilter === 'failed' ? l.type === 'failed' : true,
       );
-      const failedCount = data.logs.filter(l => l.type === 'failed').length;
+      // Counts use the deduped view so the tabs match what's rendered.
+      const failedCount = deduped.filter(l => l.type === 'failed').length;
+      const totalCount  = deduped.length;
+      // Retry only applies to failed rows; delete applies to any selection.
       const selectedFailed = filtered.filter(l => l.type === 'failed' && selectedLogs.has(l.id));
-      const canRetry = selectedFailed.length > 0 && !retryRunning;
+      const selectedAll    = filtered.filter(l => selectedLogs.has(l.id));
+      const canRetry  = selectedFailed.length > 0 && !retryRunning  && !deleteRunning;
+      const canDelete = selectedAll.length    > 0 && !deleteRunning && !retryRunning;
+      const allInViewSelected = filtered.length > 0 && filtered.every(l => selectedLogs.has(l.id));
       return `
         ${pageHeader('Email Logs', 'Timeline of every email event.')}
         <div class="flex items-center justify-between mb-3 gap-3 flex-wrap">
           <div class="flex items-center gap-2">
-            <button class="btn ${logsFilter === 'all' ? 'btn-pri' : 'btn-out'} btn-sm" onclick="setLogsFilter('all')">All (${data.logs.length})</button>
+            <button class="btn ${logsFilter === 'all' ? 'btn-pri' : 'btn-out'} btn-sm" onclick="setLogsFilter('all')">All (${totalCount})</button>
             <button class="btn ${logsFilter === 'failed' ? 'btn-pri' : 'btn-out'} btn-sm" onclick="setLogsFilter('failed')">Failed (${failedCount})</button>
           </div>
           <div class="flex items-center gap-2">
-            ${logsFilter === 'failed' && failedCount > 0
-              ? `<button class="btn btn-out btn-sm" onclick="toggleAllFailed()">${selectedFailed.length === failedCount ? 'Clear' : 'Select all failed'}</button>` : ''}
+            ${filtered.length > 0
+              ? `<button class="btn btn-out btn-sm" onclick="toggleAllVisible()">${allInViewSelected ? 'Clear' : 'Select all visible'}</button>` : ''}
             <button class="btn btn-pri btn-sm" ${canRetry ? '' : 'disabled'} onclick="retrySelectedLogs()">
               ${retryRunning ? 'Retrying…' : `Retry selected (${selectedFailed.length})`}
+            </button>
+            <button class="btn btn-out btn-sm text-red-600" ${canDelete ? '' : 'disabled'} onclick="deleteSelectedLogs()">
+              ${deleteRunning ? 'Deleting…' : `Delete selected (${selectedAll.length})`}
             </button>
           </div>
         </div>
@@ -1227,12 +1250,11 @@
                                           : 'Sent, opened, clicked, and bounced events will appear here.')
           : `<ul class="p-3 divide-y divide-slate-100">
             ${filtered.map(l => {
-              const isFailed = l.type === 'failed';
-              const checked  = selectedLogs.has(l.id);
+              const checked = selectedLogs.has(l.id);
+              // Every row is checkable (delete works on any type). Retry
+              // silently ignores non-failed rows on the server side.
               return `<li class="flex items-start gap-3 py-2.5 first:pt-0 last:pb-0">
-                ${isFailed
-                  ? `<input type="checkbox" class="mt-1 h-4 w-4 shrink-0 accent-indigo-600 cursor-pointer" ${checked ? 'checked' : ''} onchange="toggleLog('${esc(l.id)}')" title="Select to retry" />`
-                  : '<span class="w-4 shrink-0"></span>'}
+                <input type="checkbox" class="mt-1 h-4 w-4 shrink-0 accent-indigo-600 cursor-pointer" ${checked ? 'checked' : ''} onchange="toggleLog('${esc(l.id)}')" title="Select to retry or delete" />
                 <span class="pill pill-${esc(l.type)} mt-0.5">${esc(l.type)}</span>
                 <div class="flex-1">
                   <div class="text-sm">${esc(l.recipient_email || '—')}</div>
@@ -1253,12 +1275,38 @@
       else selectedLogs.add(id);
       renderPage();
     }
-    function toggleAllFailed() {
-      const failedIds = data.logs.filter(l => l.type === 'failed').map(l => l.id);
-      const allSelected = failedIds.every(id => selectedLogs.has(id));
-      if (allSelected) failedIds.forEach(id => selectedLogs.delete(id));
-      else             failedIds.forEach(id => selectedLogs.add(id));
+    function toggleAllVisible() {
+      // Grabs the currently-visible (filter-respecting) log ids.
+      const visible = data.logs
+        .filter(l => logsFilter === 'failed' ? l.type === 'failed' : true)
+        .map(l => l.id);
+      const allSelected = visible.length > 0 && visible.every(id => selectedLogs.has(id));
+      if (allSelected) visible.forEach(id => selectedLogs.delete(id));
+      else             visible.forEach(id => selectedLogs.add(id));
       renderPage();
+    }
+    async function deleteSelectedLogs() {
+      const ids = [...selectedLogs];
+      if (!ids.length) return;
+      if (!confirm(`Delete ${ids.length} log entr${ids.length === 1 ? 'y' : 'ies'}? This only removes them from Email Logs — the underlying batch record stays intact.`)) return;
+      deleteRunning = true;
+      renderPage();
+      try {
+        const r = await fetch('/api/logs/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ log_ids: ids }),
+        });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+        selectedLogs.clear();
+        await refresh();
+      } catch (err) {
+        alert(`Delete failed: ${err.message}`);
+      } finally {
+        deleteRunning = false;
+        renderPage();
+      }
     }
     async function retrySelectedLogs() {
       const ids = [...selectedLogs];
@@ -1284,10 +1332,11 @@
       }
     }
     // Expose for onclick handlers.
-    window.setLogsFilter     = setLogsFilter;
-    window.toggleLog         = toggleLog;
-    window.toggleAllFailed   = toggleAllFailed;
-    window.retrySelectedLogs = retrySelectedLogs;
+    window.setLogsFilter      = setLogsFilter;
+    window.toggleLog          = toggleLog;
+    window.toggleAllVisible   = toggleAllVisible;
+    window.retrySelectedLogs  = retrySelectedLogs;
+    window.deleteSelectedLogs = deleteSelectedLogs;
 
     // ── Settings ──────────────────────────────────────────────────────────
     // The full team-members directory was removed from this page — it lives
