@@ -1101,12 +1101,38 @@ router.post('/logs/retry', wrap(async (req, res) => {
   if (!logIds.length) return bad(res, 400, 'log_ids required');
   if (logIds.length > 200) return bad(res, 400, 'max 200 rows per retry');
 
-  const { data: logs, error: logsErr } = await sb
+  const { data: rawLogs, error: logsErr } = await sb
     .from('sender_logs_events')
-    .select('id, send_email_id, batch_id, type, recipient_email')
+    .select('id, send_email_id, batch_id, type, recipient_email, occurred_at')
     .in('id', logIds);
   if (logsErr) return bad(res, 500, `logs fetch: ${logsErr.message}`);
-  if (!logs?.length) return bad(res, 404, 'no matching log rows');
+  if (!rawLogs?.length) return bad(res, 404, 'no matching log rows');
+
+  // Dedupe by recipient_email so we never retry the same address twice
+  // in a single call — the pile-up in Email Logs was partly caused by
+  // Omar selecting duplicate rows and each attempt hitting Mailgun. Keep
+  // the NEWEST log per recipient (highest occurred_at) so we operate on
+  // the latest attempt. Duplicate log rows themselves get deleted below
+  // as a cleanup pass so the UI stops showing stale copies.
+  const byRecipient = new Map();
+  const duplicateIds = [];
+  for (const l of rawLogs) {
+    const key = (l.recipient_email || '').toLowerCase();
+    const prev = byRecipient.get(key);
+    if (!prev || new Date(l.occurred_at) > new Date(prev.occurred_at)) {
+      if (prev) duplicateIds.push(prev.id);
+      byRecipient.set(key, l);
+    } else {
+      duplicateIds.push(l.id);
+    }
+  }
+  if (duplicateIds.length) {
+    // Delete the older duplicate log rows in the background — no need
+    // to await, this is just log hygiene.
+    sb.from('sender_logs_events').delete().in('id', duplicateIds)
+      .then(() => {}, (err) => console.warn('duplicate log cleanup:', err?.message));
+  }
+  const logs = [...byRecipient.values()];
 
   // Cache per (batch, send_email) so we don't re-query for repeat lookups.
   const batchCache    = new Map(); // id → { batch, template }
