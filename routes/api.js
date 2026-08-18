@@ -1058,6 +1058,22 @@ router.post('/sync-assignees', async (_req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// ── Delete log rows ───────────────────────────────────────────────────────
+// POST /api/logs/delete with body { log_ids: [uuid, uuid, ...] }
+// Bulk-removes rows from sender_logs_events. Useful for clearing out
+// spammy retry noise or old failures once they're resolved. Does NOT
+// touch the underlying sender_sends_emails rows — those are the batch's
+// permanent record; only the log-feed decoration goes away.
+router.post('/logs/delete', wrap(async (req, res) => {
+  const sb = getSupabase();
+  const logIds = Array.isArray(req.body?.log_ids) ? req.body.log_ids : [];
+  if (!logIds.length) return bad(res, 400, 'log_ids required');
+  if (logIds.length > 500) return bad(res, 400, 'max 500 rows per delete');
+  const { error } = await sb.from('sender_logs_events').delete().in('id', logIds);
+  if (error) return bad(res, 500, error.message);
+  return res.json({ ok: true, deleted: logIds.length });
+}));
+
 // ── Retry failed sends ────────────────────────────────────────────────────
 // POST /api/logs/retry with body { log_ids: [uuid, uuid, ...] }
 //
@@ -1178,13 +1194,17 @@ router.post('/logs/retry', wrap(async (req, res) => {
 
       await sendOne({ to: log.recipient_email, subject, html });
       outcome.ok = true;
+      // Insert a fresh "sent" log for the retry so the outcome shows up
+      // in All. Then delete the ORIGINAL failed log row so the Failed
+      // tab clears — Omar's UX ask: "removed and moved to all".
       await sb.from('sender_logs_events').insert({
         send_email_id: send.id,
         batch_id: batch.id,
         type: 'sent',
         recipient_email: log.recipient_email,
-        meta: `(retry) resent from log ${log.id}`,
+        meta: `(retry) resent successfully`,
       });
+      await sb.from('sender_logs_events').delete().eq('id', log.id);
       // Also flip the queue row back to delivered if it was failed.
       if (send.status === 'failed') {
         await sb.from('sender_sends_emails').update({
