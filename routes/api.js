@@ -1215,9 +1215,13 @@ router.post('/logs/retry', wrap(async (req, res) => {
       }
     } catch (err) {
       outcome.error = String(err?.message || err).slice(0, 500);
-      // Best-effort log the retry failure too so the Email Logs page shows
-      // the outcome directly instead of a phantom silent skip.
+      // Replace the original failed log with a fresh one reflecting this
+      // retry attempt — otherwise every retry piles on a duplicate row
+      // and the Failed count goes UP instead of staying flat / declining.
+      // Net effect per row: exactly one failed entry, meta shows the
+      // latest attempt's error.
       try {
+        await sb.from('sender_logs_events').delete().eq('id', log.id);
         await sb.from('sender_logs_events').insert({
           send_email_id: log.send_email_id,
           batch_id: log.batch_id,
