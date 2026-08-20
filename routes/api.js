@@ -34,6 +34,37 @@ async function fetchLeadsForClient(sb, clientId) {
   }
 }
 
+// Resolve the batch's owner name to a users_profiles row so buildMergeRow
+// can populate sender_email and calendar_url. Matches on full_name first
+// (case-insensitive), then on the "First Last" combo formed from full_name
+// tokens (so "Maria" alone in owner still finds "Maria Sanchez"). Returns
+// null if nothing matches — mailgun.buildMergeRow falls back to the
+// pre-existing "Constellation Marketing" default in that case.
+async function lookupSenderProfile(sb, ownerName) {
+  const q = String(ownerName || '').trim();
+  if (!q) return null;
+  try {
+    // Exact case-insensitive match on full_name.
+    const exact = await sb
+      .from('users_profiles')
+      .select('id, full_name, email, role, calendar_url')
+      .ilike('full_name', q)
+      .maybeSingle();
+    if (exact?.data) return exact.data;
+    // First-name-only match. If the batch owner is stored as "Maria" but
+    // the profile is "Maria Sanchez", ilike '%Maria%' still resolves it.
+    const partial = await sb
+      .from('users_profiles')
+      .select('id, full_name, email, role, calendar_url')
+      .ilike('full_name', `%${q}%`)
+      .order('full_name', { ascending: true })
+      .limit(1);
+    return partial?.data?.[0] || null;
+  } catch {
+    return null;
+  }
+}
+
 async function fetchCrmClientForRecipient(sb, recipientName) {
   if (!recipientName) return null;
   try {
@@ -127,7 +158,7 @@ router.get('/snapshot', wrap(async (_req, res) => {
     sb.from('sender_sends_batches').select('*').order('created_at', { ascending: false }),
     sb.from('sender_sends_emails').select('*').order('created_at', { ascending: false }).limit(200),
     sb.from('sender_logs_events').select('*').order('occurred_at', { ascending: false }).limit(200),
-    sb.from('users_profiles').select('id, full_name, email, role').order('full_name', { ascending: true, nullsFirst: false }),
+    sb.from('users_profiles').select('id, full_name, email, role, calendar_url').order('full_name', { ascending: true, nullsFirst: false }),
     // KPI counts everyone who could plausibly receive an email — same set
     // the send loop uses (active / onboarding / live / hosting only).
     // Hosting-only clients need the email too — they're still active firm
@@ -375,6 +406,24 @@ router.patch('/batches/:id', wrap(async (req, res) => {
   res.json(data);
 }));
 
+// ─── User profile — per-user calendar_url (Settings page) ─────────────────
+// Whitelisted to calendar_url only — everything else on users_profiles
+// (full_name, email, role) is owned by the OS-app source of truth and
+// mustn't be edited from the Sender UI. No session auth; the honor
+// system applies here as it does for the rest of the app.
+router.patch('/users-profiles/:id', wrap(async (req, res) => {
+  const sb = getSupabase();
+  const row = clean(req.body || {}, ['calendar_url']);
+  const { data, error } = await sb
+    .from('users_profiles')
+    .update(row)
+    .eq('id', req.params.id)
+    .select('id, full_name, email, role, calendar_url')
+    .single();
+  if (error) return bad(res, 400, error.message);
+  res.json(data);
+}));
+
 router.delete('/batches/:id', wrap(async (req, res) => {
   const sb = getSupabase();
   const id = req.params.id;
@@ -426,6 +475,10 @@ router.post('/batches/:id/test-send', wrap(async (req, res) => {
     .from('sender_templates_emails').select('*').eq('id', batch.template_id).single();
   if (tplErr || !tpl) return bad(res, 400, 'Template not found');
 
+  // Same sender lookup as the real /send handler so test emails preview
+  // the correct sign-off + calendar link.
+  const sender = await lookupSenderProfile(sb, batch.owner);
+
   // Pull merge-variable values from a sample recipient if one was given,
   // OR from the first recipient on the audience list if available, OR
   // fall back to clearly-labeled placeholders so the test obviously isn't
@@ -438,6 +491,7 @@ router.post('/batches/:id/test-send', wrap(async (req, res) => {
   let mergeRow = buildMergeRow({
     recipient: {
       name:            'Test Recipient',
+      first_name:      'Test',
       email:           toEmails[0],
       firm:            'Test Firm LLP',
       account_manager: 'Test Manager',
@@ -445,13 +499,14 @@ router.post('/batches/:id/test-send', wrap(async (req, res) => {
       client_hub:      'https://example.goconstellation.com/hub/test',
     },
     batch,
+    sender,
     crmClient: null,
     overrides: { email: toEmails[0] },
   });
   if (sampleRecipientId) {
     const { data: sample } = await sb
       .from('sender_clients_recipients')
-      .select('name, email, firm, account_manager, status, client_hub')
+      .select('name, first_name, email, firm, account_manager, status, client_hub')
       .eq('id', sampleRecipientId)
       .single();
     if (sample) {
@@ -459,6 +514,7 @@ router.post('/batches/:id/test-send', wrap(async (req, res) => {
       mergeRow = buildMergeRow({
         recipient: sample,
         batch,
+        sender,
         crmClient,
         overrides: { email: toEmails[0] },  // still send to test addr
       });
@@ -468,7 +524,7 @@ router.post('/batches/:id/test-send', wrap(async (req, res) => {
     // shows what a real send to that list would look like.
     const { data: members } = await sb
       .from('sender_clients_list_members')
-      .select('recipient:sender_clients_recipients(name, email, reporting_email, firm, account_manager, status, client_hub)')
+      .select('recipient:sender_clients_recipients(name, first_name, email, reporting_email, firm, account_manager, status, client_hub)')
       .eq('list_id', batch.audience_list_id)
       .limit(5);
     const sample = (members || [])
@@ -479,6 +535,7 @@ router.post('/batches/:id/test-send', wrap(async (req, res) => {
       mergeRow = buildMergeRow({
         recipient: sample,
         batch,
+        sender,
         crmClient,
         overrides: { email: toEmails[0] },
       });
@@ -562,6 +619,13 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
   const { data: tpl, error: tplErr } = await sb
     .from('sender_templates_emails').select('*').eq('id', batch.template_id).single();
   if (tplErr || !tpl) return bad(res, 400, 'Template not found');
+
+  // Look up the sender's profile so buildMergeRow can populate
+  // {{sender_email}}, {{sender_first_name}}, {{calendar_url}}. batch.owner
+  // is a users_profiles.full_name; if the batch predates the Owner
+  // dropdown (owner is NULL), buildMergeRow falls back to
+  // "Constellation Marketing" and empty calendar_url.
+  const sender = await lookupSenderProfile(sb, batch.owner);
 
   // Build the recipient list. Two paths:
   //  1. Ad-hoc recipients (typed into the batch modal for beta-testing) take
@@ -695,6 +759,7 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
     const mergeRow  = buildMergeRow({
       recipient,
       batch,
+      sender,
       crmClient,
       overrides: { email: addresses[0] },   // in case recipient.email has multiple
     });
@@ -883,6 +948,13 @@ router.post('/clients-sync', wrap(async (_req, res) => {
       email:           c.email,
       firm:            c.firm || null,
       account_manager: accountManagerName || null,
+      // first_name is extracted from a ClickUp custom field (see
+      // FIRST_NAME_FIELD_NEEDLES in lib/crm.js). If the ClickUp task
+      // doesn't have one populated yet, we leave the column NULL so
+      // buildMergeRow falls back to firstWord(name) — the old behavior.
+      // Overwriting each sync means a manual edit in Supabase would
+      // get reverted; that's intentional — ClickUp is the source of truth.
+      first_name:      c.first_name || null,
       // Preserve the real ClickUp status — was hardcoded to 'active' before,
       // which masked Onboarding clients in the UI (they all looked Active).
       status:          c.status || 'active',
@@ -1167,7 +1239,7 @@ router.post('/logs/retry', wrap(async (req, res) => {
     if (recipientCache.has(id)) return recipientCache.get(id);
     const { data } = await sb
       .from('sender_clients_recipients')
-      .select('id, name, email, reporting_email, firm, account_manager, status, client_hub, tags')
+      .select('id, name, first_name, email, reporting_email, firm, account_manager, status, client_hub, tags')
       .eq('id', id).single();
     recipientCache.set(id, data);
     return data;
@@ -1209,9 +1281,11 @@ router.post('/logs/retry', wrap(async (req, res) => {
         };
       }
       const crmClient = await fetchCrmClientForRecipient(sb, recipient.name);
+      const sender    = await lookupSenderProfile(sb, batch.owner);
       const mergeRow  = buildMergeRow({
         recipient,
         batch,
+        sender,
         crmClient,
         overrides: { email: log.recipient_email }, // send to the exact original addr
       });
