@@ -64,6 +64,16 @@ app.listen(PORT, () => {
 });
 
 
+// ── Scheduled-batch runner ─────────────────────────────────────
+// Fires any batch whose scheduled_at has passed. See lib/schedule-runner.js.
+// Kept in-process so a single PM2 restart gets both the API and the runner.
+try {
+  const { startScheduleRunner } = require('./lib/schedule-runner');
+  startScheduleRunner();
+} catch (e) {
+  console.warn('[sender] schedule-runner not started:', e.message);
+}
+
 // ── Assignee auto-sync ──────────────────────────────────────────
 // Every 15 minutes, reconcile Sender's Luiza/Alejandra/Faith lists
 // against the OS CRM (ClickUp Client Info list). Only touches those 3

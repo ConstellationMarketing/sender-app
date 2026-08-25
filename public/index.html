@@ -170,9 +170,57 @@
       if (day < 7) return `${day}d ago`;
       return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
     }
+    // ── ET timezone helpers ────────────────────────────────────────
+    // Sender is timezone-locked to America/New_York. All displayed times
+    // show ET (EST in winter / EDT in summer). All datetime-local <input>
+    // values are interpreted as ET wall-clock and stored as UTC ISO in
+    // Supabase — the scheduler on the server compares against Date.now()
+    // in UTC too, so DST transitions are handled automatically.
+    const ET_TZ = 'America/New_York';
+
+    // UTC ISO → "YYYY-MM-DDTHH:mm" in ET wall-clock, for <input type=datetime-local>.
+    function utcToEtLocal(iso) {
+      if (!iso) return '';
+      const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: ET_TZ,
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hour12: false,
+      }).formatToParts(new Date(iso));
+      const p = Object.fromEntries(parts.map(x => [x.type, x.value]));
+      // en-CA with hour12:false can render midnight as "24" — normalize.
+      const hh = p.hour === '24' ? '00' : p.hour;
+      return `${p.year}-${p.month}-${p.day}T${hh}:${p.minute}`;
+    }
+
+    // "YYYY-MM-DDTHH:mm" ET wall-clock → UTC ISO. Uses ET's shortOffset for
+    // the given moment so a schedule set during DST (EDT, UTC-4) and one
+    // set in winter (EST, UTC-5) both come out correct.
+    function etLocalToUtc(localStr) {
+      if (!localStr) return null;
+      // Naive UTC interpretation gives us a Date near the right instant so
+      // shortOffset can tell us whether ET is on EST or EDT that day.
+      const naive = new Date(`${localStr}:00Z`);
+      const tzName = new Intl.DateTimeFormat('en-US', {
+        timeZone: ET_TZ, timeZoneName: 'shortOffset',
+      }).formatToParts(naive).find(p => p.type === 'timeZoneName')?.value || 'GMT-5';
+      const m = /GMT([+-])(\d+)(?::(\d+))?/.exec(tzName) || ['GMT-5', '-', '5', '0'];
+      const sign = m[1] === '+' ? 1 : -1;
+      const offsetMs = sign * (Number(m[2]) * 60 + Number(m[3] || 0)) * 60 * 1000;
+      // ET wall-clock = UTC + offset, so real UTC = naive − offset.
+      return new Date(naive.getTime() - offsetMs).toISOString();
+    }
+
     function fmtDateTime(iso) {
       if (!iso) return '—';
-      return new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+      // Always display in ET so a schedule set by anyone (US, PH, etc.)
+      // reads the same across the team. `timeZoneName: 'short'` renders
+      // "EST" / "EDT" so users can see the timezone explicitly.
+      return new Date(iso).toLocaleString('en-US', {
+        timeZone: ET_TZ,
+        month: 'short', day: 'numeric',
+        hour: 'numeric', minute: '2-digit',
+        timeZoneName: 'short',
+      });
     }
 
     function toast(msg, ok = true) {
@@ -359,7 +407,7 @@
           ${b.scheduled_at ? `<div class="text-xs text-ink-muted mt-1">Scheduled ${fmtDateTime(b.scheduled_at)}</div>` : ''}
           <div class="mt-4 flex gap-2 flex-wrap">
             ${b.status === 'draft' || b.status === 'scheduled' || b.status === 'failed'
-              ? `<button class="btn btn-pri btn-sm flex-1" onclick="sendBatch('${b.id}')">Send now</button>`
+              ? `<button class="btn btn-pri btn-sm flex-1" onclick="sendBatch('${b.id}')">Send immediately</button>`
               : ''}
             <!-- 🧪 Test = dry-run send to your own email. Doesn't touch
                  the batch's status or the audience list at all. Always
@@ -415,7 +463,14 @@
             hint: 'Comma, space, or newline separated. Leave blank if you picked a list above.' },
           { name: 'template_id', label: 'Template', type: 'select', required: true, value: existing?.template_id,
             options: [{ value: '', label: '— pick a template —' }, ...templates.map(t => ({ value: t.id, label: t.name }))] },
-          { name: 'scheduled_at', label: 'Schedule for (optional)', type: 'datetime-local', value: existing?.scheduled_at ? new Date(existing.scheduled_at).toISOString().slice(0,16) : '' },
+          // Schedule input is ET wall-clock. When set, the batch is saved
+          // as status='scheduled' and the server-side scheduler (lib/schedule-runner.js)
+          // fires the actual send within ~60s of the scheduled_at moment.
+          // Leave blank to skip auto-send — you can still fire it manually
+          // with "Send immediately" on the batch card.
+          { name: 'scheduled_at', label: 'Schedule for — Eastern Time (optional)', type: 'datetime-local',
+            value: utcToEtLocal(existing?.scheduled_at),
+            hint: 'Time is Eastern Time (ET, i.e. EST/EDT). The batch will auto-send within ~1 min of this time. Leave blank if you\'ll click Send immediately yourself.' },
         ],
         onSubmit: async (form) => {
           const adHoc = String(form.ad_hoc_recipients || '').trim();
@@ -429,7 +484,7 @@
             audience_list_id: form.audience_list_id || null,
             ad_hoc_recipients: adHoc || null,
             template_id: form.template_id || null,
-            scheduled_at: form.scheduled_at ? new Date(form.scheduled_at).toISOString() : null,
+            scheduled_at: etLocalToUtc(form.scheduled_at),
             status: form.scheduled_at ? 'scheduled' : 'draft',
           };
           if (existing) await api('PATCH', `/batches/${existing.id}`, payload);
@@ -498,7 +553,10 @@
       });
     };
     window.sendBatch = async id => {
-      if (!confirm('Send this batch now to all recipients in the audience list?')) return;
+      // "Send immediately" bypasses any scheduled_at and fires right now.
+      // Kept as a manual override for testing or when the scheduler is
+      // down; the normal path is set scheduled_at and let the runner fire it.
+      if (!confirm('Send this batch immediately to all recipients? This ignores any scheduled time and fires now.')) return;
       const btns = document.querySelectorAll('button');
       btns.forEach(b => b.disabled = true);
       try {
