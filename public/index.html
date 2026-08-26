@@ -835,6 +835,14 @@
                         <td class="px-2 py-3 text-right align-top">
                           <div class="flex justify-end gap-0.5">
                             <button class="btn btn-out btn-sm" style="padding:2px 6px;font-size:11px;" title="Edit Client Hub URL" onclick="editClientHub('${c.id}')">✏️</button>
+                            <!-- 📋 Add/remove this client from any list. Opens a modal
+                                 with a checkbox per list; toggling calls the same
+                                 POST /lists/:id/members and DELETE .../:recipientId
+                                 endpoints used by the auto-sync path. Auto-sync
+                                 lists warn that ClickUp Sync will overwrite manual
+                                 edits on the next tick — the user can proceed
+                                 anyway (useful for one-off campaigns). -->
+                            <button class="btn btn-out btn-sm" style="padding:2px 6px;font-size:11px;" title="Add/remove this client on any list" onclick="openListPicker('${c.id}')">📋</button>
                             ${isRotatingList
                               ? `<button class="btn btn-out btn-sm" style="padding:2px 6px;font-size:11px;" title="Move back to original list" onclick="moveBackToOriginal('${c.id}')">↩</button>`
                               : (!showingAll
@@ -964,6 +972,117 @@
       modalSubmit = null;
       renderManageListsBody();
       modal.showModal();
+    };
+
+    // ─── Per-client list picker ─────────────────────────────────────
+    // Opens a modal listing every list with a checkbox that reflects
+    // whether this client is a member. Toggling a checkbox fires the
+    // add/remove endpoint immediately (no Save button — the whole
+    // point of this UI is speed for campaign roster tweaks). Handles
+    // both fixed (auto-sync) and manual lists, but shows a warning
+    // banner if you check a fixed list, since the next Sync from
+    // ClickUp will overwrite the manual add unless the client also
+    // matches by ClickUp assignee.
+    //
+    // Data source: the same data.listMembers array the sidebar counts
+    // already read — no extra fetch needed. Local mutation of
+    // data.listMembers keeps the UI in sync between the modal and
+    // the client-row Lists column without a full refresh.
+    let currentListPickerRecipientId = null;
+
+    window.openListPicker = (recipientId) => {
+      currentListPickerRecipientId = recipientId;
+      const recipient = (data.recipients || []).find(r => r.id === recipientId);
+      const clientLabel = recipient?.name || 'this client';
+      $('#modal-title').textContent = `Lists for ${clientLabel}`;
+      $('#modal-submit').style.display = 'none';
+      $('#modal-cancel').textContent = 'Done';
+      modalSubmit = null;
+      renderListPickerBody();
+      modal.showModal();
+    };
+
+    function renderListPickerBody() {
+      const body = $('#modal-body');
+      const recipientId = currentListPickerRecipientId;
+      // Build the set of list_ids this client is currently a member of.
+      const memberOf = new Set(
+        (data.listMembers || [])
+          .filter(m => m.recipient_id === recipientId)
+          .map(m => m.list_id)
+      );
+      // Same sort as Manage Lists: fixed first, rotating last, alphabetical.
+      const lists = (data.lists || []).slice().sort((a, b) => {
+        const ra = /rotating/i.test(a.name || '');
+        const rb = /rotating/i.test(b.name || '');
+        if (ra !== rb) return ra ? 1 : -1;
+        if (!!b.is_fixed !== !!a.is_fixed) return (b.is_fixed ? 1 : 0) - (a.is_fixed ? 1 : 0);
+        return String(a.name).localeCompare(String(b.name));
+      });
+      body.innerHTML = `
+        <div class="text-xs text-ink-soft mb-3 leading-snug">
+          Check a list to add this client, uncheck to remove. Saves as you click.
+          Auto-sync lists will re-sync from ClickUp on the next tick — manual
+          changes to those lists stick only if the client also matches by
+          ClickUp assignee.
+        </div>
+        <div class="space-y-1.5">
+          ${lists.length === 0
+            ? '<div class="text-xs text-ink-soft italic">No lists yet — create one from ⚙ Manage lists.</div>'
+            : lists.map(l => {
+                const isRotating = /rotating/i.test(l.name || '');
+                const checked = memberOf.has(l.id);
+                return `
+                <label class="flex items-center justify-between px-3 py-2 rounded-lg border border-slate-200 hover:bg-slate-50 cursor-pointer">
+                  <div class="flex items-center gap-2 min-w-0 flex-1">
+                    <input type="checkbox" ${checked ? 'checked' : ''}
+                           onchange="toggleListMembership('${l.id}', this.checked, this)" />
+                    <span class="text-sm truncate">${isRotating ? '🔁 ' : ''}${esc(l.name)}</span>
+                  </div>
+                  <span class="text-[10px] text-ink-soft ml-2">
+                    ${isRotating ? 'manual' : (l.is_fixed ? '⚡ auto-sync' : 'manual')}
+                  </span>
+                </label>`;
+              }).join('')}
+        </div>
+      `;
+    }
+
+    window.toggleListMembership = async (listId, checked, checkboxEl) => {
+      const recipientId = currentListPickerRecipientId;
+      if (!recipientId) return;
+      const list = (data.lists || []).find(l => l.id === listId);
+      const listName = list?.name || 'list';
+      // Disable while in-flight so a rapid double-click can't race
+      // insert + delete on the same row.
+      if (checkboxEl) checkboxEl.disabled = true;
+      try {
+        if (checked) {
+          await api('POST', `/lists/${encodeURIComponent(listId)}/members`, { recipient_id: recipientId });
+          // Local mutation so the sidebar counts + client-row Lists column
+          // reflect the change immediately without a full refresh().
+          data.listMembers = data.listMembers || [];
+          if (!data.listMembers.some(m => m.list_id === listId && m.recipient_id === recipientId)) {
+            data.listMembers.push({ list_id: listId, recipient_id: recipientId });
+          }
+          toast(`Added to "${listName}"`);
+        } else {
+          await api('DELETE', `/lists/${encodeURIComponent(listId)}/members/${encodeURIComponent(recipientId)}`);
+          data.listMembers = (data.listMembers || []).filter(
+            m => !(m.list_id === listId && m.recipient_id === recipientId)
+          );
+          toast(`Removed from "${listName}"`);
+        }
+        // Re-render just the current view (not a full network refresh) so
+        // the row's Lists column and the sidebar counts stay in sync.
+        renderPage();
+      } catch (e) {
+        // Revert the checkbox visually + surface the error.
+        if (checkboxEl) checkboxEl.checked = !checked;
+        toast(`Failed: ${e.message}`, false);
+      } finally {
+        if (checkboxEl) checkboxEl.disabled = false;
+      }
     };
 
     function renderManageListsBody() {
