@@ -937,13 +937,25 @@ router.post('/clients-sync', wrap(async (_req, res) => {
   // from THIS sync attempt, not stale ones from a previous run.
   global.__lastSyncErrors = [];
 
+  // Collect every ClickUp task ID we saw this run so we can flag anything
+  // else as orphaned at the end. Stored as strings to match the DB column.
+  const seenClickupTaskIds = new Set();
+
   for (const c of clients) {
-    // Upsert the recipient row by email.
+    // Upsert the recipient row by clickup_task_id. See migration
+    // sql/2026-08-26_recipient_clickup_task_id.sql for the "why":
+    // email was the old key and it created a new row every time a
+    // task's email was blank (synthetic placeholder), then never
+    // reconciled — result was duplicate firms in All Clients.
+    const clickupTaskId = String(c.id);
+    seenClickupTaskIds.add(clickupTaskId);
+
     const accountManagerName = (c.assignees || [])
       .map(a => a.name || a.email || '')
       .filter(Boolean)
       .join(', ');
     const row = {
+      clickup_task_id: clickupTaskId,
       name:            c.name,
       email:           c.email,
       firm:            c.firm || null,
@@ -958,10 +970,32 @@ router.post('/clients-sync', wrap(async (_req, res) => {
       // Preserve the real ClickUp status — was hardcoded to 'active' before,
       // which masked Onboarding clients in the UI (they all looked Active).
       status:          c.status || 'active',
+      // Row is currently active in ClickUp — clear any stale orphan flag.
+      orphaned_at:     null,
     };
+
+    // Heal legacy rows before upsert: any pre-migration row still
+    // keyed only by email needs its clickup_task_id populated FIRST,
+    // otherwise the onConflict:'clickup_task_id' upsert can't match it
+    // and would insert a duplicate. The placeholder-email pattern is
+    // covered by matching on email (real address) AND, for placeholder
+    // rows, matching the "(no-email-clickup-<id>)" pattern.
+    if (c.email) {
+      await sb.from('sender_clients_recipients')
+        .update({ clickup_task_id: clickupTaskId })
+        .eq('email', c.email)
+        .is('clickup_task_id', null);
+    }
+    // The placeholder-email variant: "(no-email-clickup-<task_id>)".
+    // Same task id → same row we should be pointing at.
+    await sb.from('sender_clients_recipients')
+      .update({ clickup_task_id: clickupTaskId })
+      .eq('email', `(no-email-clickup-${clickupTaskId})`)
+      .is('clickup_task_id', null);
+
     const { data: upserted, error: upErr } = await sb
       .from('sender_clients_recipients')
-      .upsert(row, { onConflict: 'email' })
+      .upsert(row, { onConflict: 'clickup_task_id' })
       .select('id, email, original_list_id')
       .single();
     if (upErr) {
@@ -1011,10 +1045,39 @@ router.post('/clients-sync', wrap(async (_req, res) => {
     synced++;
   }
 
+  // Orphan sweep — any row that has a clickup_task_id but wasn't in this
+  // sync's active set represents a task that was deleted, archived, or
+  // filtered out of the active statuses in ClickUp. Flag it with
+  // orphaned_at so it's visible for cleanup. Rows that never got a
+  // clickup_task_id (untagged legacy) are left alone; they'll be healed
+  // on subsequent syncs when their ClickUp task shows up in the pull.
+  let orphaned = 0;
+  if (seenClickupTaskIds.size) {
+    // PostgREST doesn't accept an unbounded IN list well; batch to 500.
+    // Any row NOT in the batch AND with a non-null clickup_task_id AND
+    // not already flagged gets orphaned_at set to now(). We compute this
+    // as a single query using the negation of the seen set.
+    const seenList = [...seenClickupTaskIds]
+      .map(id => `"${String(id).replace(/"/g, '\\"')}"`)
+      .join(',');
+    const { error: orphanErr, count } = await sb
+      .from('sender_clients_recipients')
+      .update({ orphaned_at: new Date().toISOString() }, { count: 'exact' })
+      .not('clickup_task_id', 'is', null)
+      .not('clickup_task_id', 'in', `(${seenList})`)
+      .is('orphaned_at', null);
+    if (orphanErr) {
+      console.warn('[clients-sync] orphan sweep failed:', orphanErr.message);
+    } else {
+      orphaned = count || 0;
+    }
+  }
+
   res.json({
     ok:       true,
     synced,
     skipped,
+    orphaned,
     errors:   global.__lastSyncErrors || [],
     lists:    Object.values(lists).map(l => ({ id: l.id, name: l.name })),
   });
