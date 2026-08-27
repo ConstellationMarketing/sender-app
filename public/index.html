@@ -734,9 +734,25 @@
                 : data.lists.map(l => {
                     const memberCount = data.listMembers.filter(m => m.list_id === l.id).length;
                     const isRotating = /rotating/i.test(l.name || '');
-                    return `<div class="flex justify-between items-center px-3 py-2 rounded-lg cursor-pointer ${l.id === activeListId ? 'nav-active' : 'hover:bg-slate-50'}" onclick="selectList('${l.id}')">
+                    // Two auto-managed "All Clients" lists share a display
+                    // name but differ by scope (report_only / newsletter_only —
+                    // see sql/2026-08-14_all_clients_two_scopes.sql). Rendering
+                    // them both as literally "All Clients" made it impossible to
+                    // tell which is which in the sidebar. Add a scope suffix so
+                    // users can pick the right one at a glance.
+                    let displayName = l.name || '';
+                    let scopeSuffix = '';
+                    let scopeHint   = '';
+                    if (l.report_only) {
+                      scopeSuffix = ' (Reports)';
+                      scopeHint   = 'Only visible in the Monthly Reports audience dropdown.';
+                    } else if (l.newsletter_only) {
+                      scopeSuffix = ' (Newsletter)';
+                      scopeHint   = 'Only visible in the Newsletter audience dropdown.';
+                    }
+                    return `<div class="flex justify-between items-center px-3 py-2 rounded-lg cursor-pointer ${l.id === activeListId ? 'nav-active' : 'hover:bg-slate-50'}" onclick="selectList('${l.id}')" title="${esc(scopeHint)}">
                       <div class="min-w-0">
-                        <div class="truncate">${isRotating ? '🔁 ' : ''}${esc(l.name)}</div>
+                        <div class="truncate">${isRotating ? '🔁 ' : ''}${esc(displayName)}${scopeSuffix ? `<span class="text-[11px] text-ink-soft ml-1">${esc(scopeSuffix)}</span>` : ''}</div>
                         <div class="text-[11px] text-ink-soft truncate">${memberCount} client${memberCount === 1 ? '' : 's'}</div>
                       </div>
                     </div>`;
@@ -834,19 +850,33 @@
                         <td class="px-3 py-3 text-ink-muted text-xs align-top">${c.last_emailed_at ? relTime(c.last_emailed_at) : 'never'}</td>
                         <td class="px-2 py-3 text-right align-top">
                           <div class="flex justify-end gap-0.5">
-                            <button class="btn btn-out btn-sm" style="padding:2px 6px;font-size:11px;" title="Edit Client Hub URL" onclick="editClientHub('${c.id}')">✏️</button>
-                            <!-- 📋 Add/remove this client from any list. Opens a modal
-                                 with a checkbox per list; toggling calls the same
-                                 POST /lists/:id/members and DELETE .../:recipientId
-                                 endpoints used by the auto-sync path. Auto-sync
-                                 lists warn that ClickUp Sync will overwrite manual
-                                 edits on the next tick — the user can proceed
-                                 anyway (useful for one-off campaigns). -->
-                            <button class="btn btn-out btn-sm" style="padding:2px 6px;font-size:11px;" title="Add/remove this client on any list" onclick="openListPicker('${c.id}')">📋</button>
+                            <!-- All row buttons get an aria-label AND a title so the
+                                 hover tooltip reads as a full sentence, not a truncated
+                                 verb. Titles describe what the action DOES and where
+                                 the change lands — non-tech users otherwise had to
+                                 guess from the icon alone. -->
+                            <button class="btn btn-out btn-sm"
+                                    style="padding:2px 6px;font-size:11px;"
+                                    aria-label="Edit Client Hub URL for ${esc(c.name)}"
+                                    title="Edit Client Hub URL — the link this client sees when the newsletter says {{client_hub}}. Opens a small editor; saves to the Master DB + ClickUp mirror."
+                                    onclick="editClientHub('${c.id}')">✏️</button>
+                            <button class="btn btn-out btn-sm"
+                                    style="padding:2px 6px;font-size:11px;"
+                                    aria-label="Manage list memberships for ${esc(c.name)}"
+                                    title="Add or remove ${esc(c.name)} on any list. Opens a checkbox list of every list; toggling saves instantly. Use this for manual campaigns (like Partners or Newsletter Subscribers)."
+                                    onclick="openListPicker('${c.id}')">📋</button>
                             ${isRotatingList
-                              ? `<button class="btn btn-out btn-sm" style="padding:2px 6px;font-size:11px;" title="Move back to original list" onclick="moveBackToOriginal('${c.id}')">↩</button>`
+                              ? `<button class="btn btn-out btn-sm"
+                                        style="padding:2px 6px;font-size:11px;"
+                                        aria-label="Move ${esc(c.name)} back to their original manager list"
+                                        title="Move ${esc(c.name)} back to their original manager list (${esc(originalList?.name || 'unknown')}). Undoes a previous 🔁 rotation."
+                                        onclick="moveBackToOriginal('${c.id}')">↩</button>`
                               : (!showingAll
-                                  ? `<button class="btn btn-out btn-sm" style="padding:2px 6px;font-size:11px;" title="Move to Rotating List" onclick="moveToRotating('${c.id}')">🔁</button>`
+                                  ? `<button class="btn btn-out btn-sm"
+                                            style="padding:2px 6px;font-size:11px;"
+                                            aria-label="Rotate ${esc(c.name)} off ${esc(activeList?.name || 'this list')} into the Rotating List"
+                                            title="Rotate ${esc(c.name)} off ${esc(activeList?.name || 'this list')} into the Rotating List — the ClickUp Sync will leave them there until you click ↩ back. Use this to temporarily reassign a client between managers without touching ClickUp."
+                                            onclick="moveToRotating('${c.id}')">🔁</button>`
                                   : '')}
                           </div>
                         </td>
