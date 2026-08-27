@@ -838,7 +838,12 @@
                             ? '<span class="text-xs text-ink-soft">—</span>'
                             : `<div class="space-y-1">${emails.map(e => `<a href="mailto:${esc(e)}" class="hover:underline block truncate" title="${esc(e)}">${esc(e)}</a>`).join('')}${usingOverride ? '<div class="text-[10px] text-emerald-600 mt-0.5" title="Reporting/Newsletter Email from OS CRM overrides ClickUp\'s Contact Email">from CRM override</div>' : ''}</div>`}
                         </td>
-                        <td class="px-3 py-3 align-top"><span class="pill pill-${esc(c.status)}">${esc(c.status)}</span></td>
+                        <td class="px-3 py-3 align-top">
+                          <span class="pill pill-${esc(c.status)}">${esc(c.status)}</span>
+                          ${c.skip_autosend
+                            ? `<div class="text-[10px] text-red-700 mt-1 font-semibold" title="Excluded from every auto-send by the 🚫 toggle. Reversible.">🚫 skipped</div>`
+                            : ''}
+                        </td>
                         <td class="px-3 py-3 align-top">
                           ${c.client_hub
                             ? `<a href="${esc(c.client_hub)}" target="_blank" rel="noopener" class="text-xs text-brand-600 hover:underline block truncate" style="max-width: 100px;" title="${esc(c.client_hub)}">${esc(c.client_hub.replace(/^https?:\/\//, ''))}</a>`
@@ -865,6 +870,20 @@
                                     aria-label="Manage list memberships for ${esc(c.name)}"
                                     title="Add or remove ${esc(c.name)} on any list. Opens a checkbox list of every list; toggling saves instantly. Use this for manual campaigns (like Partners or Newsletter Subscribers)."
                                     onclick="openListPicker('${c.id}')">📋</button>
+                            <!-- 🚫 Skip auto-send toggle. See migration
+                                 2026-08-27_recipient_skip_autosend.sql. When
+                                 ON, every real batch send excludes this
+                                 recipient; test-sends still work so a
+                                 strategist can preview the manual copy. Row
+                                 gets a visual "manual only" badge (below)
+                                 when skipped. -->
+                            <button class="btn btn-out btn-sm"
+                                    style="padding:2px 6px;font-size:11px;${c.skip_autosend ? 'background:#fee2e2;border-color:#fca5a5;' : ''}"
+                                    aria-label="${c.skip_autosend ? 'Re-enable auto-send for' : 'Skip auto-send for'} ${esc(c.name)}"
+                                    title="${c.skip_autosend
+                                      ? `Currently SKIPPED from every auto-send. Click to re-enable — ${esc(c.name)} will receive scheduled batches again on the next send.`
+                                      : `Skip ${esc(c.name)} from every auto-send. They stay on all lists for tracking but never receive scheduled batches — use this when they need a manual/personalized report instead. Reversible.`}"
+                                    onclick="toggleSkipAutosend('${c.id}', ${c.skip_autosend ? 'false' : 'true'})">${c.skip_autosend ? '🚫' : '⏸'}</button>
                             ${isRotatingList
                               ? `<button class="btn btn-out btn-sm"
                                         style="padding:2px 6px;font-size:11px;"
@@ -887,6 +906,30 @@
             })()}`, 'lg:col-span-3')}
         </div>`;
     }
+
+    // Skip / re-enable auto-send for a recipient. Sender-local flag — does
+    // NOT touch ClickUp status. See migration 2026-08-27_recipient_skip_autosend.sql.
+    // Row stays on every list they're already on; only the batch send loop
+    // excludes them. Test-sends still work, so a strategist can preview the
+    // manual copy they'll send outside the auto flow.
+    window.toggleSkipAutosend = async (recipientId, nextValueStr) => {
+      const nextValue = nextValueStr === 'true' || nextValueStr === true;
+      const recipient = (data.recipients || []).find(r => r.id === recipientId);
+      const name = recipient?.name || 'this client';
+      if (nextValue && !confirm(
+        `Skip ${name} from every auto-send?\n\nThey stay on all lists for tracking, but scheduled batches will not include them. Test-sends and manual sends still work. Reversible — click again to re-enable.`
+      )) return;
+      try {
+        await api('PATCH', `/recipients/${encodeURIComponent(recipientId)}`, { skip_autosend: nextValue });
+        // Local mutation so the row re-renders with the new button state
+        // without a full network refresh.
+        if (recipient) recipient.skip_autosend = nextValue;
+        toast(nextValue ? `${name} skipped from auto-sends` : `${name} back on auto-sends`);
+        renderPage();
+      } catch (e) {
+        toast(`Failed: ${e.message}`, false);
+      }
+    };
 
     window.removeFromList = async (listId, recipientId) => {
       if (!confirm('Remove this client from the list? (The client itself is not deleted.)')) return;
