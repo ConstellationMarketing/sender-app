@@ -218,7 +218,7 @@ router.post('/recipients', wrap(async (req, res) => {
 
 router.patch('/recipients/:id', wrap(async (req, res) => {
   const sb = getSupabase();
-  const row = clean(req.body || {}, ['name','email','firm','account_manager','status','tags','client_hub']);
+  const row = clean(req.body || {}, ['name','email','firm','account_manager','status','tags','client_hub','skip_autosend']);
   const { data, error } = await sb.from('sender_clients_recipients').update(row).eq('id', req.params.id).select().single();
   if (error) return bad(res, 400, error.message);
 
@@ -682,7 +682,16 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
 
     recipients = (members || [])
       .map(m => m.recipient)
-      .filter(r => r && hasRealEmail(sendToOf(r)) && SENDABLE_STATUSES.has(String(r.status || '').toLowerCase()));
+      // Also exclude any recipient with skip_autosend=true — a Sender-local
+      // opt-out flag independent of ClickUp status. See migration
+      // sql/2026-08-27_recipient_skip_autosend.sql for the motivation.
+      // Real /batches/:id/send only; test-send path deliberately ignores
+      // this so a strategist can preview what the manual copy will look
+      // like even when the recipient is skipped from auto-sends.
+      .filter(r => r
+        && hasRealEmail(sendToOf(r))
+        && SENDABLE_STATUSES.has(String(r.status || '').toLowerCase())
+        && !r.skip_autosend);
 
     if (!recipients.length) return bad(res, 400, 'No sendable recipients in this list (statuses checked: active / onboarding / live / hosting only — must have a real email)');
   }
