@@ -1499,7 +1499,17 @@
     // the batch/template/recipient and re-sends via Mailgun, writes a
     // new log event with a "(retry)" meta prefix so the outcome shows
     // up in the same feed.
-    let logsFilter    = 'all';
+    // logsFilter now covers three axes:
+    //   type    — 'all' | 'sent' | 'failed' | 'test' (the values the DB
+    //             actually stores in sender_logs_events.type). Old code
+    //             only had 'all' / 'failed'.
+    //   batch   — batch id or '' for all batches.
+    //   search  — free-text substring match against recipient_email,
+    //             meta, and the batch name. Case-insensitive.
+    // Everything is done client-side against the last 200 rows the API
+    // returned; a full audit search would need a paginated backend query
+    // which is out of scope for this pass.
+    let logsFilter    = { type: 'all', batch: '', search: '' };
     let selectedLogs  = new Set();
     let retryRunning  = false;
     let deleteRunning = false;
@@ -1517,26 +1527,92 @@
         seen.add(key);
         deduped.push(l);
       }
-      const filtered = deduped.filter(l =>
-        logsFilter === 'failed' ? l.type === 'failed' : true,
-      );
-      // Counts use the deduped view so the tabs match what's rendered.
-      const failedCount = deduped.filter(l => l.type === 'failed').length;
-      const totalCount  = deduped.length;
+      // Batch name lookup so both the filter dropdown AND each row
+      // can render the batch name instead of just a UUID.
+      const batchNameById = new Map();
+      (data.batches || []).forEach(b => batchNameById.set(b.id, b.name || '(unnamed)'));
+
+      // Type counts computed from the deduped view (before applying the
+      // batch / search filters) so the tab counts stay stable while the
+      // user narrows the view. Only common types get their own tab;
+      // anything else (opened, clicked, bounced webhooks) rolls into
+      // "All".
+      const typeCount = { all: deduped.length, sent: 0, failed: 0, test: 0 };
+      for (const l of deduped) {
+        if (typeCount[l.type] != null) typeCount[l.type]++;
+      }
+
+      // Apply all three filter axes.
+      const q = String(logsFilter.search || '').toLowerCase().trim();
+      const filtered = deduped.filter(l => {
+        if (logsFilter.type !== 'all' && l.type !== logsFilter.type) return false;
+        if (logsFilter.batch && l.batch_id !== logsFilter.batch) return false;
+        if (q) {
+          const bn = batchNameById.get(l.batch_id) || '';
+          const hay = [
+            l.recipient_email || '',
+            l.meta || '',
+            bn,
+            l.type || '',
+          ].join(' ').toLowerCase();
+          if (!hay.includes(q)) return false;
+        }
+        return true;
+      });
+
       // Retry only applies to failed rows; delete applies to any selection.
       const selectedFailed = filtered.filter(l => l.type === 'failed' && selectedLogs.has(l.id));
       const selectedAll    = filtered.filter(l => selectedLogs.has(l.id));
       const canRetry  = selectedFailed.length > 0 && !retryRunning  && !deleteRunning;
       const canDelete = selectedAll.length    > 0 && !deleteRunning && !retryRunning;
       const allInViewSelected = filtered.length > 0 && filtered.every(l => selectedLogs.has(l.id));
+
+      // Batches that actually appear in the log window — no point listing
+      // batches with zero log entries in the filter dropdown.
+      const batchesInLogs = new Set(deduped.map(l => l.batch_id).filter(Boolean));
+      const batchOptions = (data.batches || [])
+        .filter(b => batchesInLogs.has(b.id))
+        .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+
+      const filtersActive = logsFilter.type !== 'all' || !!logsFilter.batch || !!q;
+      const emptyTitle =
+        logsFilter.type === 'failed' ? 'No failed sends' :
+        filtersActive ? 'No events match your filters' : 'No events yet';
+      const emptyHint =
+        logsFilter.type === 'failed' ? 'Everything sent has been delivered — nothing to retry.' :
+        filtersActive ? 'Try clearing the search or switching to "All".' :
+        'Sent, failed, and test-send events will appear here.';
+
       return `
-        ${pageHeader('Email Logs', 'Timeline of every email event.')}
-        <div class="flex items-center justify-between mb-3 gap-3 flex-wrap">
-          <div class="flex items-center gap-2">
-            <button class="btn ${logsFilter === 'all' ? 'btn-pri' : 'btn-out'} btn-sm" onclick="setLogsFilter('all')">All (${totalCount})</button>
-            <button class="btn ${logsFilter === 'failed' ? 'btn-pri' : 'btn-out'} btn-sm" onclick="setLogsFilter('failed')">Failed (${failedCount})</button>
-          </div>
-          <div class="flex items-center gap-2">
+        ${pageHeader('Email Logs', 'Timeline of every email event. Filter by type, batch, or free-text search across recipient + batch name + error message.')}
+        <div class="flex items-center gap-2 mb-3 flex-wrap">
+          <button class="btn ${logsFilter.type === 'all'    ? 'btn-pri' : 'btn-out'} btn-sm" onclick="setLogsType('all')">All (${typeCount.all})</button>
+          <button class="btn ${logsFilter.type === 'sent'   ? 'btn-pri' : 'btn-out'} btn-sm" onclick="setLogsType('sent')">Sent (${typeCount.sent})</button>
+          <button class="btn ${logsFilter.type === 'failed' ? 'btn-pri' : 'btn-out'} btn-sm" onclick="setLogsType('failed')">Failed (${typeCount.failed})</button>
+          <button class="btn ${logsFilter.type === 'test'   ? 'btn-pri' : 'btn-out'} btn-sm" onclick="setLogsType('test')">Test (${typeCount.test})</button>
+        </div>
+        <div class="flex items-center gap-3 mb-3 flex-wrap">
+          <input
+            type="text"
+            id="logs-search"
+            value="${esc(logsFilter.search)}"
+            placeholder="Search email, error, batch name…"
+            class="px-3 py-1.5 rounded-lg border border-slate-200 text-sm w-64"
+            oninput="setLogsSearch(this.value)"
+          />
+          <select
+            id="logs-batch-filter"
+            class="px-3 py-1.5 rounded-lg border border-slate-200 text-sm bg-white"
+            onchange="setLogsBatch(this.value)"
+            title="Show only log events from this batch"
+          >
+            <option value="">All batches (${batchOptions.length})</option>
+            ${batchOptions.map(b => `<option value="${esc(b.id)}" ${logsFilter.batch === b.id ? 'selected' : ''}>${esc(b.name || '(unnamed)')}</option>`).join('')}
+          </select>
+          ${filtersActive
+            ? `<button class="btn btn-out btn-sm" onclick="resetLogsFilter()" title="Clear all filters + search">Reset filters</button>`
+            : ''}
+          <div class="ml-auto flex items-center gap-2">
             ${filtered.length > 0
               ? `<button class="btn btn-out btn-sm" onclick="toggleAllVisible()">${allInViewSelected ? 'Clear' : 'Select all visible'}</button>` : ''}
             <button class="btn btn-pri btn-sm" ${canRetry ? '' : 'disabled'} onclick="retrySelectedLogs()">
@@ -1547,20 +1623,23 @@
             </button>
           </div>
         </div>
+        <div class="text-xs text-ink-soft mb-3">
+          Showing ${filtered.length} of ${deduped.length} events${filtersActive ? ' (filtered)' : ''}.
+        </div>
         ${card(filtered.length === 0
-          ? empty(logsFilter === 'failed' ? 'No failed sends' : 'No events yet',
-                  logsFilter === 'failed' ? 'Everything sent has been delivered — nothing to retry.'
-                                          : 'Sent, opened, clicked, and bounced events will appear here.')
+          ? empty(emptyTitle, emptyHint)
           : `<ul class="p-3 divide-y divide-slate-100">
             ${filtered.map(l => {
               const checked = selectedLogs.has(l.id);
+              const batchName = batchNameById.get(l.batch_id) || (l.batch_id ? '(unknown batch)' : '');
               // Every row is checkable (delete works on any type). Retry
               // silently ignores non-failed rows on the server side.
               return `<li class="flex items-start gap-3 py-2.5 first:pt-0 last:pb-0">
                 <input type="checkbox" class="mt-1 h-4 w-4 shrink-0 accent-indigo-600 cursor-pointer" ${checked ? 'checked' : ''} onchange="toggleLog('${esc(l.id)}')" title="Select to retry or delete" />
                 <span class="pill pill-${esc(l.type)} mt-0.5">${esc(l.type)}</span>
-                <div class="flex-1">
+                <div class="flex-1 min-w-0">
                   <div class="text-sm">${esc(l.recipient_email || '—')}</div>
+                  ${batchName ? `<div class="text-[11px] text-ink-soft"><span class="text-slate-400">from batch:</span> <button class="hover:underline text-slate-600" onclick="setLogsBatch('${esc(l.batch_id)}')" title="Filter Email Logs to just this batch">${esc(batchName)}</button></div>` : ''}
                   ${l.meta ? `<div class="text-xs text-ink-soft truncate">${esc(l.meta)}</div>` : ''}
                 </div>
                 <div class="text-xs text-ink-soft whitespace-nowrap">${relTime(l.occurred_at)}</div>
@@ -1568,8 +1647,39 @@
             }).join('')}
           </ul>`)}`;
     }
-    function setLogsFilter(f) {
-      logsFilter = f;
+    function setLogsType(t) {
+      logsFilter.type = t;
+      selectedLogs.clear();
+      renderPage();
+    }
+    function setLogsBatch(b) {
+      logsFilter.batch = b || '';
+      selectedLogs.clear();
+      renderPage();
+      // Preserve focus + caret when re-rendering the search input.
+      const el = document.getElementById('logs-search');
+      if (el) el.focus();
+    }
+    // Debounce the search input so we don't re-render on every keystroke —
+    // 200ms is snappy without being wasteful.
+    let logsSearchDebounce = null;
+    function setLogsSearch(v) {
+      clearTimeout(logsSearchDebounce);
+      logsSearchDebounce = setTimeout(() => {
+        logsFilter.search = String(v || '');
+        selectedLogs.clear();
+        renderPage();
+        // Restore focus + caret to end of the (newly-created) input.
+        const el = document.getElementById('logs-search');
+        if (el) {
+          el.focus();
+          const n = el.value.length;
+          try { el.setSelectionRange(n, n); } catch {}
+        }
+      }, 200);
+    }
+    function resetLogsFilter() {
+      logsFilter = { type: 'all', batch: '', search: '' };
       selectedLogs.clear();
       renderPage();
     }
@@ -1634,8 +1744,13 @@
         renderPage();
       }
     }
-    // Expose for onclick handlers.
-    window.setLogsFilter      = setLogsFilter;
+    // Expose for onclick handlers. (setLogsFilter replaced by the
+    // three-axis setLogsType / setLogsBatch / setLogsSearch trio +
+    // resetLogsFilter — all exposed below.)
+    window.setLogsType        = setLogsType;
+    window.setLogsBatch       = setLogsBatch;
+    window.setLogsSearch      = setLogsSearch;
+    window.resetLogsFilter    = resetLogsFilter;
     window.toggleLog          = toggleLog;
     window.toggleAllVisible   = toggleAllVisible;
     window.retrySelectedLogs  = retrySelectedLogs;
