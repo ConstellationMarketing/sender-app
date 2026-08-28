@@ -515,10 +515,40 @@
     const TEST_EMAIL_KEY = 'sender-test-emails';
     window.testSendBatch = async id => {
       const prior = localStorage.getItem(TEST_EMAIL_KEY) || '';
+      // Build the "Test as [client]" dropdown from this batch's audience
+      // list. Backend already accepts sample_recipient_id — this is the
+      // UI that finally exposes it. Previously the merge preview came
+      // from whoever happened to be first on the list, so spot-checking
+      // one specific client (e.g. Kevin Martin, not row #1) meant
+      // reordering the list or typing into ad-hoc recipients. Now you
+      // pick who you want to be at test time.
+      const batch = data.batches.find(b => b.id === id);
+      const listId = batch?.audience_list_id;
+      const memberIds = listId
+        ? new Set(data.listMembers.filter(m => m.list_id === listId).map(m => m.recipient_id))
+        : new Set();
+      const listRecipients = (data.recipients || [])
+        .filter(r => memberIds.has(r.id))
+        .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+      const sampleOptions = [
+        { value: '', label: '— default (first active client on the list) —' },
+        ...listRecipients.map(r => ({
+          value: r.id,
+          label: r.firm || r.name || r.email || '(unnamed)',
+        })),
+      ];
       openModal({
         title: 'Test-send this batch',
         submitLabel: 'Send test',
         fields: [
+          {
+            name: 'sample_recipient_id',
+            label: 'Test as (merge vars from…)',
+            type: 'select',
+            options: sampleOptions,
+            value: '',
+            hint: 'Pick which client\'s merge variables ({{firm}}, {{first_name}}, etc.) render in the preview. Default uses whoever is first on the audience list — same as before. Only clients on this batch\'s audience list are shown.',
+          },
           {
             name: 'to_list',
             label: 'Recipients (one or more)',
@@ -527,7 +557,7 @@
             required: true,
             value: prior,
             placeholder: 'omar@goconstellation.com, luiza@goconstellation.com',
-            hint: 'Comma, space, or newline separated. The real audience list is NOT contacted — merge vars are pulled from the first active client.',
+            hint: 'Comma, space, or newline separated. The real audience list is NOT contacted — the test goes only to these addresses.',
           },
         ],
         onSubmit: async (form) => {
@@ -538,7 +568,10 @@
           }
           // Remember what they typed so the next test pre-fills it.
           localStorage.setItem(TEST_EMAIL_KEY, raw);
-          const r = await api('POST', `/batches/${id}/test-send`, { to_list: raw });
+          const sampleId = String(form.sample_recipient_id || '').trim();
+          const payload = { to_list: raw };
+          if (sampleId) payload.sample_recipient_id = sampleId;
+          const r = await api('POST', `/batches/${id}/test-send`, payload);
           const results = Array.isArray(r.results) ? r.results : [];
           const okCount = results.filter(x => x.ok).length;
           const failed  = results.filter(x => !x.ok);
