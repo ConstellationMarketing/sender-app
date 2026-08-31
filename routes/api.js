@@ -582,7 +582,7 @@ router.post('/batches/:id/test-send', wrap(async (req, res) => {
   const results = [];
   for (const addr of toEmails) {
     try {
-      const out = await sendOne({ to: addr, subject, html });
+      const out = await sendOne({ to: addr, subject, html, replyTo: mergeRow.sender_email || '' });
       results.push({ to: addr, ok: true, id: out?.id || null });
       await logTestEvent(addr, `(test only) — merged from ${mergeRow.name || 'test recipient'}`);
     } catch (e) {
@@ -782,7 +782,7 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
     let lastErr  = null;
     for (const addr of addresses) {
       try {
-        await sendOne({ to: addr, subject, html });
+        await sendOne({ to: addr, subject, html, replyTo: mergeRow.sender_email || '' });
         anyOk = true;
         await sb.from('sender_logs_events').insert({
           send_email_id: qi.id, batch_id: batch.id,
@@ -1364,7 +1364,7 @@ router.post('/logs/retry', wrap(async (req, res) => {
       const subject = applyMergeVars(template.subject || batch.name, mergeRow);
       const html    = applyMergeVars(template.body_html || '', mergeRow);
 
-      await sendOne({ to: log.recipient_email, subject, html });
+      await sendOne({ to: log.recipient_email, subject, html, replyTo: mergeRow.sender_email || '' });
       outcome.ok = true;
       // Insert a fresh "sent" log for the retry so the outcome shows up
       // in All. Then delete the ORIGINAL failed log row so the Failed
