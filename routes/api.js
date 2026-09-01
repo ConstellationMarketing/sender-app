@@ -639,11 +639,20 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
   //  2. Saved audience list — read the members and filter by sendable status.
   let recipients = [];
 
-  // Effective send-to address: reporting_email (CRM override) wins over
-  // the ClickUp-synced .email. Hoisted here so BOTH the ad-hoc branch
-  // and the audience-list branch can call it (ad-hoc rows only have
-  // .email; audience-list rows can have either).
-  const sendToOf = (r) => (String(r?.reporting_email || '').trim() || String(r?.email || '').trim());
+  // Effective send-to address. Policy change 2026-09-02 (Omar): real
+  // clients are sent ONLY to the OS CRM's Reporting/Newsletter Email
+  // (reporting_email). The ClickUp-synced .email is no longer used as a
+  // send address — it caused sends to stale ClickUp contact emails when
+  // the CRM had the correct one. Clients without reporting_email are
+  // filtered out of sends (and flagged in the UI) until the strategist
+  // sets the field in the OS CRM.
+  //
+  // Ad-hoc rows (typed into the batch modal; no DB id) keep using
+  // .email — that IS the typed address, there's no CRM row behind it.
+  const sendToOf = (r) => {
+    if (!r?.id) return String(r?.email || '').trim();
+    return String(r?.reporting_email || '').trim();
+  };
   if (batch.ad_hoc_recipients && String(batch.ad_hoc_recipients).trim()) {
     const matches = String(batch.ad_hoc_recipients).match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || [];
     const seen = new Set();
@@ -698,7 +707,7 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
         && SENDABLE_STATUSES.has(String(r.status || '').toLowerCase())
         && !r.skip_autosend);
 
-    if (!recipients.length) return bad(res, 400, 'No sendable recipients in this list (statuses checked: active / onboarding / live / hosting only — must have a real email)');
+    if (!recipients.length) return bad(res, 400, 'No sendable recipients in this list (statuses checked: active / onboarding / live / hosting only — must have a Reporting/Newsletter Email set in the OS CRM)');
   }
 
   await sb.from('sender_sends_batches').update({
