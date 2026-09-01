@@ -11,16 +11,21 @@ const { sendOne, applyMergeVars, ensureEnv: ensureMailgun, buildMergeRow } = req
 // Fetch the CRM `client` row matching a recipient name (case-insensitive).
 // Returns the row (with website, ga4_property_id, ahrefs_project_id) or null.
 // Silent on error — the send still works, just without CRM-joined merge vars.
-// Fetch the "spr.metric_monthly.total_leads" for a client for the CURRENT
-// calendar month (YYYY-MM). Returns a number or null. Best-effort — a
-// missing row (e.g. this month hasn't been aggregated yet by the SPR
-// pipeline) or a Supabase hiccup just returns null so the {{leads}}
-// merge token renders empty in the email instead of breaking the send.
+// Fetch the "spr.metric_monthly.total_leads" for a client for the
+// PREVIOUS calendar month (YYYY-MM) — the month the report is about.
+// Monthly reports always go out in the first week of the FOLLOWING
+// month (Camila/CS confirmed 2026-09-01), so "this month" data is both
+// wrong (report covers last month) and usually empty (the SPR pipeline
+// hasn't aggregated a month that just started). Returns a number or
+// null. Best-effort — a missing row or a Supabase hiccup just returns
+// null so the {{leads}} merge token renders empty instead of breaking
+// the send.
 async function fetchLeadsForClient(sb, clientId) {
   if (!clientId) return null;
   try {
     const now = new Date();
-    const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const month = `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}`;
     const { data } = await sb
       .schema('spr')
       .from('metric_monthly')
