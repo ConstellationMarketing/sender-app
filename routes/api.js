@@ -29,11 +29,24 @@ async function fetchLeadsForClient(sb, clientId) {
     const { data } = await sb
       .schema('spr')
       .from('metric_monthly')
-      .select('total_leads')
+      .select('total_leads, total_organic_leads, total_ads_leads')
       .eq('client_id', clientId)
       .eq('month', month)
       .maybeSingle();
-    return typeof data?.total_leads === 'number' ? data.total_leads : null;
+    if (!data) return null;
+    // {{leads}} = leads from channels WE manage: organic (incl GBP) +
+    // managed ads — the same buckets the Client Hub reports. total_leads
+    // counts every WhatConverts lead (direct/referral/other included) and
+    // inflated the emails vs the Hub (Henkels & Baker 130 vs 122,
+    // Sabbeth 126 vs ~102 — reviewer video 2026-09-03).
+    // Fallback to total_leads only while the new columns (SPR migration
+    // 046) haven't backfilled this month yet.
+    const org = data.total_organic_leads;
+    const ads = data.total_ads_leads;
+    if (typeof org === 'number' || typeof ads === 'number') {
+      return (org ?? 0) + (ads ?? 0);
+    }
+    return typeof data.total_leads === 'number' ? data.total_leads : null;
   } catch {
     return null;
   }
