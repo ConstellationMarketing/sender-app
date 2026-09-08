@@ -86,11 +86,26 @@ async function lookupSenderProfile(sb, ownerName) {
 async function fetchCrmClientForRecipient(sb, recipientName) {
   if (!recipientName) return null;
   try {
-    const { data } = await sb
+    const SELECT = 'id, name, website, ga4_property_id, ahrefs_project_id, client_actual_name';
+    let { data } = await sb
       .from('client')
-      .select('id, website, ga4_property_id, ahrefs_project_id, client_actual_name')
+      .select(SELECT)
       .ilike('name', String(recipientName).trim())
       .maybeSingle();
+    // Normalized-name fallback (2026-09-09): exact matching silently
+    // missed clients whose Sender name drifted from the CRM name by
+    // punctuation — "Wosnik Law, LLC" vs "Wosnik Law LLC" — leaving
+    // {{leads}}, {{website}} etc. EMPTY in their emails. Compare on
+    // lowercase alphanumerics only (same normalization the CRM mirror
+    // uses). ~100 client rows, so the full fetch is cheap.
+    if (!data) {
+      const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const target = norm(recipientName);
+      if (target) {
+        const { data: all } = await sb.from('client').select(SELECT);
+        data = (all || []).find((c) => norm(c.name) === target) || null;
+      }
+    }
     if (!data) return null;
     // Attach this month's total_leads (from spr.metric_monthly) so the
     // {{leads}} merge tag can resolve without buildMergeRow having to
@@ -997,14 +1012,12 @@ router.post('/clients-sync', wrap(async (_req, res) => {
       firm:            c.firm || null,
       account_manager: accountManagerName || null,
       // first_name is extracted from a ClickUp custom field (see
-      // FIRST_NAME_FIELD_NEEDLES in lib/crm.js — 'Client Actual Name'
-      // has top priority). Policy change 2026-09-09: when ClickUp has NO
-      // value, the key is OMITTED from the upsert so an existing value is
-      // PRESERVED — the OS CRM's "Client Actual Name" field dual-writes
-      // into this column, and a re-sync must not wipe it back to NULL.
-      // When ClickUp DOES have a value it still wins (source-of-truth
-      // behavior unchanged for populated fields).
-      ...(c.first_name ? { first_name: c.first_name } : {}),
+      // FIRST_NAME_FIELD_NEEDLES in lib/crm.js). If the ClickUp task
+      // doesn't have one populated yet, we leave the column NULL so
+      // buildMergeRow falls back to firstWord(name) — the old behavior.
+      // Overwriting each sync means a manual edit in Supabase would
+      // get reverted; that's intentional — ClickUp is the source of truth.
+      first_name:      c.first_name || null,
       // Preserve the real ClickUp status — was hardcoded to 'active' before,
       // which masked Onboarding clients in the UI (they all looked Active).
       status:          c.status || 'active',
