@@ -83,30 +83,69 @@ async function lookupSenderProfile(sb, ownerName) {
   }
 }
 
-async function fetchCrmClientForRecipient(sb, recipientName) {
-  if (!recipientName) return null;
+// Join a Sender recipient to their OS CRM `client` row. Accepts the full
+// recipient row (or { name } for legacy callers).
+//
+// Match order (2026-09-09 rework after Dressie's blank {{leads}}):
+//   1. ClickUp task id — sender_clients_recipients.clickup_task_id and
+//      client.clickup_ticket_id both refer to the SAME ClickUp CRM-list
+//      task, so this is exact and immune to any naming drift.
+//   2. Exact name (legacy fast path).
+//   3. Normalized name — lowercase alphanumerics only, so punctuation
+//      drift ("Wosnik Law, LLC" vs "Wosnik Law LLC") still matches.
+//      (Word-level drift like "The … LLC" vs bare name is exactly why
+//      the id join is now first: names can NEVER be fully trusted.)
+//
+// SELF-HEAL: when a name path (2/3) matches but the client row's
+// clickup_ticket_id differs from the recipient's clickup_task_id, we
+// backfill it (best-effort) so the NEXT lookup — and every other system
+// joining on that id (CRM mirror writes, CRM pages) — hits the exact id
+// path. The fleet converges to id-based matching by itself.
+async function fetchCrmClientForRecipient(sb, recipientOrName) {
+  const recipient = typeof recipientOrName === 'string'
+    ? { name: recipientOrName }
+    : (recipientOrName || {});
+  const recipientName = recipient.name;
+  const taskId = String(recipient.clickup_task_id || '').trim();
+  if (!recipientName && !taskId) return null;
   try {
-    const SELECT = 'id, name, website, ga4_property_id, ahrefs_project_id, client_actual_name';
-    let { data } = await sb
-      .from('client')
-      .select(SELECT)
-      .ilike('name', String(recipientName).trim())
-      .maybeSingle();
-    // Normalized-name fallback (2026-09-09): exact matching silently
-    // missed clients whose Sender name drifted from the CRM name by
-    // punctuation — "Wosnik Law, LLC" vs "Wosnik Law LLC" — leaving
-    // {{leads}}, {{website}} etc. EMPTY in their emails. Compare on
-    // lowercase alphanumerics only (same normalization the CRM mirror
-    // uses). ~100 client rows, so the full fetch is cheap.
-    if (!data) {
+    const SELECT = 'id, name, clickup_ticket_id, website, ga4_property_id, ahrefs_project_id, client_actual_name';
+    let data = null;
+    let matchedBy = null;
+
+    // 1. Exact ClickUp task id.
+    if (taskId) {
+      const r = await sb.from('client').select(SELECT)
+        .eq('clickup_ticket_id', taskId).maybeSingle();
+      if (r.data) { data = r.data; matchedBy = 'task_id'; }
+    }
+
+    // 2. Exact name.
+    if (!data && recipientName) {
+      const r = await sb.from('client').select(SELECT)
+        .ilike('name', String(recipientName).trim()).maybeSingle();
+      if (r.data) { data = r.data; matchedBy = 'name'; }
+    }
+
+    // 3. Normalized name (~100 rows; cheap).
+    if (!data && recipientName) {
       const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
       const target = norm(recipientName);
       if (target) {
         const { data: all } = await sb.from('client').select(SELECT);
         data = (all || []).find((c) => norm(c.name) === target) || null;
+        if (data) matchedBy = 'normalized_name';
       }
     }
     if (!data) return null;
+
+    // Self-heal the id link on name-path matches.
+    if (taskId && matchedBy !== 'task_id' && String(data.clickup_ticket_id || '') !== taskId) {
+      try {
+        await sb.from('client').update({ clickup_ticket_id: taskId }).eq('id', data.id);
+        console.log(`crm-join self-heal: client "${data.name}" clickup_ticket_id -> ${taskId} (was ${data.clickup_ticket_id || 'null'})`);
+      } catch { /* best-effort */ }
+    }
     // Attach this month's total_leads (from spr.metric_monthly) so the
     // {{leads}} merge tag can resolve without buildMergeRow having to
     // become async. Absent data → null → renders as an empty string in
@@ -539,11 +578,11 @@ router.post('/batches/:id/test-send', wrap(async (req, res) => {
   if (sampleRecipientId) {
     const { data: sample } = await sb
       .from('sender_clients_recipients')
-      .select('name, first_name, email, firm, account_manager, status, client_hub')
+      .select('name, first_name, email, firm, account_manager, status, client_hub, clickup_task_id')
       .eq('id', sampleRecipientId)
       .single();
     if (sample) {
-      const crmClient = await fetchCrmClientForRecipient(sb, sample.name);
+      const crmClient = await fetchCrmClientForRecipient(sb, sample);
       mergeRow = buildMergeRow({
         recipient: sample,
         batch,
@@ -557,14 +596,14 @@ router.post('/batches/:id/test-send', wrap(async (req, res) => {
     // shows what a real send to that list would look like.
     const { data: members } = await sb
       .from('sender_clients_list_members')
-      .select('recipient:sender_clients_recipients(name, first_name, email, reporting_email, firm, account_manager, status, client_hub)')
+      .select('recipient:sender_clients_recipients(name, first_name, email, reporting_email, firm, account_manager, status, client_hub, clickup_task_id)')
       .eq('list_id', batch.audience_list_id)
       .limit(5);
     const sample = (members || [])
       .map(m => m.recipient)
       .find(r => r && (r.status === 'active' || r.status === 'live' || r.status === 'onboarding'));
     if (sample) {
-      const crmClient = await fetchCrmClientForRecipient(sb, sample.name);
+      const crmClient = await fetchCrmClientForRecipient(sb, sample);
       mergeRow = buildMergeRow({
         recipient: sample,
         batch,
@@ -806,7 +845,7 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
     // Full 22-variable merge row. Joins CRM client row by name for
     // website / ga4_property_id / ahrefs_project_id. Empty strings if
     // no CRM match — the template renders '' where those tags appear.
-    const crmClient = await fetchCrmClientForRecipient(sb, recipient.name);
+    const crmClient = await fetchCrmClientForRecipient(sb, recipient);
     const mergeRow  = buildMergeRow({
       recipient,
       batch,
@@ -1353,7 +1392,7 @@ router.post('/logs/retry', wrap(async (req, res) => {
     if (recipientCache.has(id)) return recipientCache.get(id);
     const { data } = await sb
       .from('sender_clients_recipients')
-      .select('id, name, first_name, email, reporting_email, firm, account_manager, status, client_hub, tags')
+      .select('id, name, first_name, email, reporting_email, firm, account_manager, status, client_hub, tags, clickup_task_id')
       .eq('id', id).single();
     recipientCache.set(id, data);
     return data;
@@ -1394,7 +1433,7 @@ router.post('/logs/retry', wrap(async (req, res) => {
           client_hub: '',
         };
       }
-      const crmClient = await fetchCrmClientForRecipient(sb, recipient.name);
+      const crmClient = await fetchCrmClientForRecipient(sb, recipient);
       const sender    = await lookupSenderProfile(sb, batch.owner);
       const mergeRow  = buildMergeRow({
         recipient,
