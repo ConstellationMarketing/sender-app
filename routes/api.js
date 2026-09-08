@@ -997,12 +997,14 @@ router.post('/clients-sync', wrap(async (_req, res) => {
       firm:            c.firm || null,
       account_manager: accountManagerName || null,
       // first_name is extracted from a ClickUp custom field (see
-      // FIRST_NAME_FIELD_NEEDLES in lib/crm.js). If the ClickUp task
-      // doesn't have one populated yet, we leave the column NULL so
-      // buildMergeRow falls back to firstWord(name) — the old behavior.
-      // Overwriting each sync means a manual edit in Supabase would
-      // get reverted; that's intentional — ClickUp is the source of truth.
-      first_name:      c.first_name || null,
+      // FIRST_NAME_FIELD_NEEDLES in lib/crm.js — 'Client Actual Name'
+      // has top priority). Policy change 2026-09-09: when ClickUp has NO
+      // value, the key is OMITTED from the upsert so an existing value is
+      // PRESERVED — the OS CRM's "Client Actual Name" field dual-writes
+      // into this column, and a re-sync must not wipe it back to NULL.
+      // When ClickUp DOES have a value it still wins (source-of-truth
+      // behavior unchanged for populated fields).
+      ...(c.first_name ? { first_name: c.first_name } : {}),
       // Preserve the real ClickUp status — was hardcoded to 'active' before,
       // which masked Onboarding clients in the UI (they all looked Active).
       status:          c.status || 'active',
