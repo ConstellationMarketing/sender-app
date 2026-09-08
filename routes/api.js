@@ -88,7 +88,7 @@ async function fetchCrmClientForRecipient(sb, recipientName) {
   try {
     const { data } = await sb
       .from('client')
-      .select('id, website, ga4_property_id, ahrefs_project_id')
+      .select('id, website, ga4_property_id, ahrefs_project_id, client_actual_name')
       .ilike('name', String(recipientName).trim())
       .maybeSingle();
     if (!data) return null;
