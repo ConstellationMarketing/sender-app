@@ -1031,6 +1031,20 @@ router.post('/clients-sync', wrap(async (_req, res) => {
   // else as orphaned at the end. Stored as strings to match the DB column.
   const seenClickupTaskIds = new Set();
 
+  // Existing rows' emails keyed by clickup_task_id — used by the email-
+  // downgrade guard below (2026-09-22, Dressie incident): a client whose
+  // ClickUp email field goes empty must NOT have their working address
+  // silently replaced with a "(no-email-clickup-…)" placeholder.
+  const { data: existingRows } = await sb
+    .from('sender_clients_recipients')
+    .select('clickup_task_id, email');
+  const existingEmailByTask = new Map(
+    (existingRows || [])
+      .filter(r => r.clickup_task_id)
+      .map(r => [String(r.clickup_task_id), String(r.email || '')])
+  );
+  const isPlaceholderEmail = (e) => /^\(no-email-clickup-/.test(String(e || ''));
+
   for (const c of clients) {
     // Upsert the recipient row by clickup_task_id. See migration
     // sql/2026-08-26_recipient_clickup_task_id.sql for the "why":
@@ -1063,6 +1077,21 @@ router.post('/clients-sync', wrap(async (_req, res) => {
       // Row is currently active in ClickUp — clear any stale orphan flag.
       orphaned_at:     null,
     };
+
+    // Email-downgrade guard (2026-09-22): ClickUp stays the source of truth
+    // for email — a CHANGED address still syncs through — but an EMPTY
+    // ClickUp field (which arrives here as the synthetic placeholder) never
+    // overwrites an existing real address. This is how Dressie's send-to
+    // emails vanished: their ClickUp contact-email field went empty and the
+    // next sync faithfully wiped the working address. Keep the old one and
+    // log it loudly instead.
+    if (isPlaceholderEmail(row.email)) {
+      const existing = existingEmailByTask.get(clickupTaskId);
+      if (existing && !isPlaceholderEmail(existing)) {
+        row.email = existing;
+        console.warn(`[clients-sync] ClickUp email is EMPTY for "${c.name}" — kept existing address ${existing} (fix the ClickUp field)`);
+      }
+    }
 
     // Heal legacy rows before upsert: any pre-migration row still
     // keyed only by email needs its clickup_task_id populated FIRST,
