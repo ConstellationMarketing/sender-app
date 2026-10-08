@@ -57,10 +57,12 @@ CREATE TABLE IF NOT EXISTS public.sender_tracking_events (
 COMMENT ON TABLE public.sender_tracking_events IS
   'One row per Mailgun webhook event (delivered/opened/clicked/failed/…) for Sender report emails. Written by /api/mailgun-events. Attribution via the custom vars stamped at send time; clickup_task_id is the stable client key.';
 
--- Dedupe: ignore a repeat delivery of the same Mailgun event.
+-- Dedupe: ignore a repeat delivery of the same Mailgun event. Must be a FULL
+-- unique index (not partial) — Postgres ON CONFLICT (used by the webhook's
+-- upsert) cannot target a partial index. A full unique index still permits
+-- multiple NULL mailgun_event_id rows (NULLs are distinct in Postgres).
 CREATE UNIQUE INDEX IF NOT EXISTS sender_tracking_events_mailgun_event_id_uniq
-  ON public.sender_tracking_events (mailgun_event_id)
-  WHERE mailgun_event_id IS NOT NULL;
+  ON public.sender_tracking_events (mailgun_event_id);
 
 -- Query paths: per-client, per-batch, per-cycle, per-event-type.
 CREATE INDEX IF NOT EXISTS sender_tracking_events_clickup_task_id_idx
