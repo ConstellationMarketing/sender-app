@@ -365,6 +365,84 @@ router.get('/tracking-summary', wrap(async (req, res) => {
   res.json({ ok: true, month, totals, clients });
 }));
 
+// ─── Post-send reconciliation (Phase 4) ────────────────────────────────────
+// "Did everyone who should have gotten a report actually get one?" Compares
+// the AUTOMATED master list (active recipients) — and an optional CUSTOM list
+// the user pastes/uploads for clients reported on by hand — against who was
+// actually delivered to this cycle (sender_tracking_events 'delivered').
+//
+//   POST /api/reconciliation
+//   body: { month?: "September 2026", customNames?: ["Firm A", "Firm B", ...] }
+//
+// Returns the missed clients for each list. "Sent" = a delivered/accepted
+// tracking event for that client in this report_month (real sends carry the
+// month + clickup_task_id; test sends don't, so they're naturally excluded).
+router.post('/reconciliation', wrap(async (req, res) => {
+  const sb = getSupabase();
+  const body = req.body || {};
+
+  const monthNames = ['January','February','March','April','May','June',
+    'July','August','September','October','November','December'];
+  const defaultMonth = (() => {
+    const d = new Date();
+    const prev = new Date(d.getFullYear(), d.getMonth() - 1, 1);
+    return `${monthNames[prev.getMonth()]} ${prev.getFullYear()}`;
+  })();
+  const month = (body.month && String(body.month)) || defaultMonth;
+  const customNames = Array.isArray(body.customNames)
+    ? body.customNames.map(s => String(s || '').trim()).filter(Boolean)
+    : [];
+
+  const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+  // 1. Automated master: active recipients with a real email, not skipped,
+  //    not orphaned. (Placeholder "(no-email…" addresses never get sent.)
+  const { data: recips, error: rErr } = await sb
+    .from('sender_clients_recipients')
+    .select('id, name, email, reporting_email, status, clickup_task_id, skip_autosend, orphaned_at');
+  if (rErr) return bad(res, 500, rErr.message);
+  const active = (recips || []).filter(r => {
+    const st = String(r.status || '').toLowerCase();
+    const isActive = ['live', 'hosting', 'onboarding'].includes(st);
+    const hasEmail = (r.reporting_email && /@/.test(r.reporting_email)) ||
+      (r.email && /@/.test(r.email) && !String(r.email).startsWith('(no-email'));
+    return isActive && hasEmail && !r.skip_autosend && !r.orphaned_at;
+  });
+
+  // 2. Sent set for the cycle — delivered/accepted tracking events this month.
+  const { data: evs, error: eErr } = await sb
+    .from('sender_tracking_events')
+    .select('clickup_task_id, client_name, event')
+    .eq('report_month', month)
+    .in('event', ['delivered', 'accepted']);
+  if (eErr) return bad(res, 500, eErr.message);
+  const sentTaskIds = new Set();
+  const sentNames = new Set();
+  for (const e of (evs || [])) {
+    if (e.clickup_task_id) sentTaskIds.add(String(e.clickup_task_id));
+    if (e.client_name) sentNames.add(norm(e.client_name));
+  }
+  const wasSent = (taskId, name) =>
+    (taskId && sentTaskIds.has(String(taskId))) || (name && sentNames.has(norm(name)));
+
+  // 3. Diff each list.
+  const autoMissed = active
+    .filter(r => !wasSent(r.clickup_task_id, r.name))
+    .map(r => ({ name: r.name, clickup_task_id: r.clickup_task_id, email: r.reporting_email || r.email }))
+    .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+
+  const customMissed = customNames
+    .filter(n => !sentNames.has(norm(n)))
+    .sort((a, b) => a.localeCompare(b));
+
+  res.json({
+    ok: true,
+    month,
+    automated: { expected: active.length, missed: autoMissed, missed_count: autoMissed.length },
+    custom:    { expected: customNames.length, missed: customMissed, missed_count: customMissed.length },
+  });
+}));
+
 // ─── Snapshot (one-shot read for the UI) ───────────────────────────────────
 router.get('/snapshot', wrap(async (_req, res) => {
   const sb = getSupabase();
