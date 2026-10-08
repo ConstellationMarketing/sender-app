@@ -134,6 +134,7 @@
     const PAGES = [
       { id: 'dashboard',       label: 'Dashboard' },
       { id: 'tracking',        label: 'Tracking' },
+      { id: 'reconciliation',  label: 'Reconciliation' },
       { id: 'monthly-reports', label: 'Monthly Reports' },
       { id: 'newsletters',     label: 'Newsletters' },
       { id: 'client-lists',    label: 'Client Lists' },
@@ -1946,6 +1947,75 @@
               </tr></thead><tbody>${rows}</tbody></table>`)}`;
     }
 
+    // ── Reconciliation (who was supposed to get a report but didn't) ─────
+    // POSTs /api/reconciliation with the month + an optional pasted custom-
+    // report client list. Shows the missed clients for the automated list and
+    // for the custom list.
+    function renderReconciliation() {
+      return `
+        ${pageHeader('Reconciliation', 'After a cycle, catch any client who should have gotten a report but did not.')}
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          ${card(`<div class="p-5 space-y-3">
+            <div>
+              <label class="text-[11px] uppercase tracking-wide text-ink-soft font-semibold">Report month</label>
+              <input id="recon-month" class="mt-1 w-full rounded-lg border border-slate-200 px-3 py-1.5 text-sm" placeholder="e.g. September 2026" />
+            </div>
+            <div>
+              <label class="text-[11px] uppercase tracking-wide text-ink-soft font-semibold">Custom-report clients (optional)</label>
+              <p class="text-xs text-ink-soft mt-0.5 mb-1">One firm name per line — paste from the custom-reports tracking sheet. We check these got a report too.</p>
+              <textarea id="recon-custom" rows="8" class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-mono" placeholder="Firm A&#10;Firm B&#10;Firm C"></textarea>
+            </div>
+            <button onclick="runReconciliation()" class="rounded-lg bg-slate-900 text-white px-4 py-2 text-sm font-medium">Run reconciliation</button>
+          </div>`)}
+          <div id="recon-results" class="lg:col-span-2 text-sm text-ink-muted">Enter a month (blank = last month), optionally paste the custom list, and run.</div>
+        </div>`;
+    }
+
+    async function runReconciliation() {
+      const out = document.getElementById('recon-results');
+      if (!out) return;
+      const month = (document.getElementById('recon-month')?.value || '').trim();
+      const customNames = (document.getElementById('recon-custom')?.value || '')
+        .split('\n').map(s => s.trim()).filter(Boolean);
+      out.innerHTML = 'Running…';
+      try {
+        const r = await fetch('/api/reconciliation', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ month: month || undefined, customNames }),
+        });
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+        out.innerHTML = renderReconResults(j);
+      } catch (e) {
+        out.innerHTML = `<div class="text-rose-600 text-sm">${esc(e.message)}</div>`;
+      }
+    }
+
+    function renderReconResults(j) {
+      const block = (title, expected, missed, renderItem) => {
+        const ok = missed.length === 0;
+        return card(`
+          <div class="p-5 pb-3 border-b border-slate-100 flex items-center justify-between">
+            <div><h3 class="text-sm font-semibold">${esc(title)}</h3>
+            <p class="text-xs text-ink-soft">${fmtNum(expected)} expected · ${ok ? 'all sent' : `<span class="text-rose-600 font-medium">${fmtNum(missed.length)} missed</span>`}</p></div>
+            <div class="text-2xl">${ok ? '✅' : '⚠️'}</div>
+          </div>
+          ${ok
+            ? empty('All accounted for', 'Every client in this list got a report this cycle.')
+            : `<ul class="p-3 space-y-1">${missed.map(renderItem).join('')}</ul>`}`, 'mb-4');
+      };
+      return `
+        <div class="text-sm text-ink-soft mb-3">Cycle: <span class="font-medium text-slate-700">${esc(j.month)}</span></div>
+        ${block('Automated list', j.automated.expected, j.automated.missed, m => `
+          <li class="p-2.5 rounded-lg hover:bg-slate-50">
+            <div class="text-sm font-medium">${esc(m.name || '(unknown)')}</div>
+            <div class="text-xs text-ink-soft">${esc(m.email || 'no email on file')}</div>
+          </li>`)}
+        ${block('Custom reports', j.custom.expected, j.custom.missed, n => `
+          <li class="p-2.5 rounded-lg hover:bg-slate-50"><div class="text-sm font-medium">${esc(n)}</div></li>`)}`;
+    }
+
     function renderPage() {
       // upload-csv removed from the map — page no longer reachable from the
       // nav. The renderUploadCsv() function is left defined below in case
@@ -1953,6 +2023,7 @@
       const map = {
         'dashboard':       renderDashboard,
         'tracking':        renderTracking,
+        'reconciliation':  renderReconciliation,
         'newsletters':     renderNewsletters,
         'monthly-reports': renderMonthlyReports,
         'client-lists':    renderClientLists,
