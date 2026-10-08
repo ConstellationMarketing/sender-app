@@ -5,6 +5,7 @@
 // clean 500 instead of crashing the Node process.
 
 const express = require('express');
+const crypto = require('crypto');
 const { getSupabase } = require('../lib/supabase');
 const { sendOne, applyMergeVars, ensureEnv: ensureMailgun, buildMergeRow } = require('../lib/mailgun');
 
@@ -204,10 +205,101 @@ router.get('/health', (_req, res) => {
       MAILGUN_API_KEY:           !!process.env.MAILGUN_API_KEY,
       MAILGUN_DOMAIN:            !!process.env.MAILGUN_DOMAIN,
       MAILGUN_FROM:              !!process.env.MAILGUN_FROM,
+      MAILGUN_WEBHOOK_SIGNING_KEY: !!process.env.MAILGUN_WEBHOOK_SIGNING_KEY,
       CLICKUP_API_KEY:           !!process.env.CLICKUP_API_KEY,
     },
   });
 });
+
+// ─── Mailgun events webhook (open/click/delivery tracking) ─────────────────
+// Phase 2 of the monthly-reporting observability work. Mailgun POSTs here for
+// every event on a report send (delivered / opened / clicked / failed / …).
+// We verify Mailgun's signature, then write one row to sender_tracking_events,
+// attributed via the custom variables we stamped at send time (clickup_task_id,
+// send_email_id, batch_id, report_month). Phase 3 (summary) and Phase 4
+// (reconciliation) read from that table.
+//
+// Mailgun setup (one-time, in the Mailgun dashboard → Webhooks): point the
+// Delivered / Opened / Clicked / Permanent-Fail / Temporary-Fail / Complained /
+// Unsubscribed events at:  https://sender.goconstellation.com/api/mailgun-events
+// and set MAILGUN_WEBHOOK_SIGNING_KEY to the account's HTTP webhook signing key.
+//
+// Signature: Mailgun signs `timestamp + token` with HMAC-SHA256 using the
+// signing key (not the sending API key). Both values are in the JSON body, so
+// the global express.json() parse is fine — no raw-body handling needed.
+function verifyMailgunSignature(sig, signingKey) {
+  if (!sig || !sig.timestamp || !sig.token || !sig.signature || !signingKey) return false;
+  // Reject stale timestamps (>15 min) to blunt replay attempts.
+  const ageSec = Math.abs(Date.now() / 1000 - Number(sig.timestamp));
+  if (!Number.isFinite(ageSec) || ageSec > 900) return false;
+  const expected = crypto.createHmac('sha256', signingKey)
+    .update(String(sig.timestamp) + String(sig.token))
+    .digest('hex');
+  try {
+    const a = Buffer.from(expected, 'hex');
+    const b = Buffer.from(String(sig.signature), 'hex');
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  } catch { return false; }
+}
+
+router.post('/mailgun-events', wrap(async (req, res) => {
+  const signingKey = process.env.MAILGUN_WEBHOOK_SIGNING_KEY;
+  const body = req.body || {};
+  const sig = body.signature;
+  const data = body['event-data'] || body.eventData || null;
+
+  // Verify when a signing key is configured. If it isn't (not set up yet),
+  // log loudly but still 200 so Mailgun doesn't hammer retries — the endpoint
+  // is unauthenticated only in that un-configured window.
+  if (signingKey) {
+    if (!verifyMailgunSignature(sig, signingKey)) {
+      return bad(res, 401, 'invalid signature');
+    }
+  } else {
+    console.warn('[sender] mailgun-events: MAILGUN_WEBHOOK_SIGNING_KEY unset — accepting unverified');
+  }
+
+  if (!data || !data.event) {
+    // Not an event payload (e.g. a test ping) — acknowledge so Mailgun is happy.
+    return res.json({ ok: true, ignored: true });
+  }
+
+  const vars = data['user-variables'] || {};
+  const headers = (data.message && data.message.headers) || {};
+  const numOrNull = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const row = {
+    mailgun_event_id:   data.id || null,
+    mailgun_message_id: headers['message-id'] || null,
+    event:              String(data.event),
+    recipient_email:    data.recipient || null,
+    send_email_id:      numOrNull(vars.send_email_id),
+    batch_id:           numOrNull(vars.batch_id),
+    recipient_id:       numOrNull(vars.recipient_id),
+    clickup_task_id:    vars.clickup_task_id || null,
+    client_name:        vars.client_name || null,
+    report_month:       vars.report_month || null,
+    url:                data.url || null,
+    event_ts:           data.timestamp ? new Date(Number(data.timestamp) * 1000).toISOString() : null,
+    raw:                data,
+  };
+
+  const sb = getSupabase();
+  // Idempotent: a repeat delivery of the same Mailgun event collides on the
+  // mailgun_event_id unique index and is ignored.
+  const { error } = await sb
+    .from('sender_tracking_events')
+    .upsert(row, { onConflict: 'mailgun_event_id', ignoreDuplicates: true });
+  if (error) {
+    console.error('[sender] mailgun-events insert failed:', error.message);
+    // 500 → Mailgun retries later, so a transient DB blip doesn't lose the event.
+    return bad(res, 500, error.message);
+  }
+  return res.json({ ok: true });
+}));
 
 // ─── Snapshot (one-shot read for the UI) ───────────────────────────────────
 router.get('/snapshot', wrap(async (_req, res) => {
@@ -654,7 +746,9 @@ router.post('/batches/:id/test-send', wrap(async (req, res) => {
   const results = [];
   for (const addr of toEmails) {
     try {
-      const out = await sendOne({ to: addr, subject, html, replyTo: mergeRow.sender_email || '' });
+      // track:false — a test send goes to the strategist, not the client, so
+      // it must not generate open/click stats on the client's report.
+      const out = await sendOne({ to: addr, subject, html, replyTo: mergeRow.sender_email || '', track: false });
       results.push({ to: addr, ok: true, id: out?.id || null });
       await logTestEvent(addr, `(test only) — merged from ${mergeRow.name || 'test recipient'}`);
     } catch (e) {
@@ -861,13 +955,30 @@ router.post('/batches/:id/send', wrap(async (req, res) => {
     // tracked per-address via the logs_events rows below.
     let anyOk    = false;
     let lastErr  = null;
+    // Tracking + reconciliation tags, same for every address of this
+    // recipient. Echoed back on every Mailgun event (delivered/opened/
+    // clicked) so the events webhook attributes each one to the client +
+    // cycle, and the post-send reconciliation can tell who was sent to.
+    // clickup_task_id is the stable client key (maps to client.clickup_ticket_id,
+    // immune to name drift). (Phase 1, 2026-10)
+    const trackVars = {
+      send_email_id: qi.id,
+      batch_id: batch.id,
+      recipient_id: recipient.id || '',
+      clickup_task_id: recipient.clickup_task_id || '',
+      client_name: recipient.name || '',
+      report_month: mergeRow.report_month_year || '',
+    };
     for (const addr of addresses) {
       try {
-        await sendOne({ to: addr, subject, html, replyTo: mergeRow.sender_email || '' });
+        const mg = await sendOne({ to: addr, subject, html, replyTo: mergeRow.sender_email || '', vars: trackVars, tags: ['monthly-report'] });
         anyOk = true;
         await sb.from('sender_logs_events').insert({
           send_email_id: qi.id, batch_id: batch.id,
           type: 'sent', recipient_email: addr,
+          // Store the Mailgun message id so delivered/opened/clicked events
+          // can be traced back to this send even aside from the custom vars.
+          meta: mg?.id ? `mailgun_id=${mg.id}` : null,
         });
       } catch (err) {
         lastErr = String(err.message || err).slice(0, 500);
@@ -1474,7 +1585,20 @@ router.post('/logs/retry', wrap(async (req, res) => {
       const subject = applyMergeVars(template.subject || batch.name, mergeRow);
       const html    = applyMergeVars(template.body_html || '', mergeRow);
 
-      await sendOne({ to: log.recipient_email, subject, html, replyTo: mergeRow.sender_email || '' });
+      // Retried sends get the same tracking + reconciliation tags as the
+      // original so their opens/clicks and delivery still attribute correctly.
+      await sendOne({
+        to: log.recipient_email, subject, html, replyTo: mergeRow.sender_email || '',
+        vars: {
+          send_email_id: send.id,
+          batch_id: batch.id,
+          recipient_id: send.recipient_id || '',
+          clickup_task_id: recipient.clickup_task_id || '',
+          client_name: recipient.name || '',
+          report_month: mergeRow.report_month_year || '',
+        },
+        tags: ['monthly-report'],
+      });
       outcome.ok = true;
       // Insert a fresh "sent" log for the retry so the outcome shows up
       // in All. Then delete the ORIGINAL failed log row so the Failed
