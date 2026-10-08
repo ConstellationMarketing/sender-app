@@ -301,6 +301,70 @@ router.post('/mailgun-events', wrap(async (req, res) => {
   return res.json({ ok: true });
 }));
 
+// ─── Tracking summary (Phase 3) ────────────────────────────────────────────
+// Per-client Received / Opened / Clicked for a report cycle, plus totals.
+// Reads sender_tracking_events (populated by the Mailgun webhook above).
+//   GET /api/tracking-summary?month=September%202026
+// Defaults to the previous calendar month (the month reports are ABOUT),
+// matching the report_month label stamped at send time.
+router.get('/tracking-summary', wrap(async (req, res) => {
+  const sb = getSupabase();
+
+  const monthNames = ['January','February','March','April','May','June',
+    'July','August','September','October','November','December'];
+  const defaultMonth = (() => {
+    const d = new Date();
+    const prev = new Date(d.getFullYear(), d.getMonth() - 1, 1);
+    return `${monthNames[prev.getMonth()]} ${prev.getFullYear()}`;
+  })();
+  const month = (req.query.month && String(req.query.month)) || defaultMonth;
+
+  const { data, error } = await sb
+    .from('sender_tracking_events')
+    .select('event, clickup_task_id, client_name, recipient_email, report_month')
+    .eq('report_month', month);
+  if (error) return bad(res, 500, error.message);
+
+  const byClient = new Map();
+  for (const e of (data || [])) {
+    const key = e.clickup_task_id || e.client_name || e.recipient_email || 'unknown';
+    let c = byClient.get(key);
+    if (!c) {
+      c = { clickup_task_id: e.clickup_task_id || null, client_name: e.client_name || null,
+            delivered: 0, opened: 0, clicked: 0, failed: 0 };
+      byClient.set(key, c);
+    }
+    const ev = String(e.event || '').toLowerCase();
+    if (ev === 'delivered') c.delivered++;
+    else if (ev === 'opened') c.opened++;
+    else if (ev === 'clicked') c.clicked++;
+    else if (ev.includes('fail') || ev === 'complained' || ev === 'rejected' || ev === 'bounced') c.failed++;
+  }
+
+  const clients = [...byClient.values()]
+    .map(c => ({
+      clickup_task_id: c.clickup_task_id,
+      client_name:     c.client_name,
+      received:        c.delivered > 0,
+      opened:          c.opened > 0,
+      clicked:         c.clicked > 0,
+      failed:          c.failed > 0,
+      open_count:      c.opened,
+      click_count:     c.clicked,
+    }))
+    .sort((a, b) => String(a.client_name || '').localeCompare(String(b.client_name || '')));
+
+  const totals = {
+    clients:  clients.length,
+    received: clients.filter(c => c.received).length,
+    opened:   clients.filter(c => c.opened).length,
+    clicked:  clients.filter(c => c.clicked).length,
+    failed:   clients.filter(c => c.failed).length,
+  };
+
+  res.json({ ok: true, month, totals, clients });
+}));
+
 // ─── Snapshot (one-shot read for the UI) ───────────────────────────────────
 router.get('/snapshot', wrap(async (_req, res) => {
   const sb = getSupabase();
