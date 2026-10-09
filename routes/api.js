@@ -1138,18 +1138,46 @@ router.post('/clients-sync', wrap(async (_req, res) => {
     if (stickyIds.has(upserted.id)) { synced++; continue; }
 
     // Figure out which manager list(s) this client belongs in.
+    //
+    // Status gate (2026-10-10): the manager/strategist lists are REPORTING
+    // lists — only live + onboarding clients belong on them. Previously this
+    // matched on assignee alone, so a Hosting client assigned to (say) Faith
+    // was re-added to Faith's list on every "Sync from ClickUp" / page
+    // refresh, fighting the status-filtered runAssigneeSync (lib/assignee-
+    // sync.js) that had just cleaned them out. Apply the SAME gate here so the
+    // two sync paths agree. Hosting clients still get upserted as recipients
+    // (for the All Clients / Newsletter lists), they just never land on a
+    // reporting list. Non-eligible clients get an empty match set, so the
+    // membership wipe below removes them and doesn't re-add them.
+    const statusNorm = String(c.status || '')
+      .toLowerCase()
+      .replace(/[_\s-]+/g, '-');
+    const eligibleForManagerList =
+      statusNorm === 'live' || statusNorm === 'onboarding';
+
     const matchedListIds = [];
-    for (const managerName of fixedNames) {
-      const listRow = lists[managerName];
-      if (!listRow) continue;
-      if ((c.assignees || []).some(a => assigneeMatchesList(a, managerName))) {
-        matchedListIds.push(listRow.id);
+    if (eligibleForManagerList) {
+      for (const managerName of fixedNames) {
+        const listRow = lists[managerName];
+        if (!listRow) continue;
+        if ((c.assignees || []).some(a => assigneeMatchesList(a, managerName))) {
+          matchedListIds.push(listRow.id);
+        }
       }
     }
 
     // Wipe existing manager-list memberships (but keep Rotating intact —
     // already filtered above) and re-write them from the match set.
-    const managerListIds = fixedNames.map(n => lists[n]?.id).filter(Boolean);
+    //
+    // Only the per-strategist lists are wiped/repopulated here. The "All
+    // Clients" (Reports) and (Newsletter) rows are also is_fixed=true but are
+    // reconciled by runAssigneeSync (lib/assignee-sync.js), which knows that
+    // the Newsletter row INCLUDES hosting. Excluding them here keeps this sync
+    // from stripping hosting clients out of the Newsletter list.
+    const managerListIds = fixedNames
+      .filter(n => n !== 'All Clients')
+      .map(n => lists[n]?.id)
+      .filter(Boolean);
     if (managerListIds.length) {
       await sb.from('sender_clients_list_members')
         .delete()
