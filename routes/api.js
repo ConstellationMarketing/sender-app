@@ -21,7 +21,7 @@ const { sendOne, applyMergeVars, ensureEnv: ensureMailgun, buildMergeRow } = req
 // null. Best-effort — a missing row or a Supabase hiccup just returns
 // null so the {{leads}} merge token renders empty instead of breaking
 // the send.
-async function fetchLeadsForClient(sb, clientId) {
+async function fetchLeadsForClient(sb, clientId, exclusionsRaw) {
   if (!clientId) return null;
   try {
     const now = new Date();
@@ -30,7 +30,10 @@ async function fetchLeadsForClient(sb, clientId) {
     const { data } = await sb
       .schema('spr')
       .from('metric_monthly')
-      .select('total_leads, total_organic_leads, total_ads_leads')
+      // Per-channel columns (leads_google_organic / ppc_leads / lsa_leads) let
+      // us subtract an EXCLUDED channel from the report total (Reporting
+      // Exclusions, 2026-10).
+      .select('total_leads, total_organic_leads, total_ads_leads, leads_google_organic, ppc_leads, lsa_leads')
       .eq('client_id', clientId)
       .eq('month', month)
       .maybeSingle();
@@ -44,10 +47,34 @@ async function fetchLeadsForClient(sb, clientId) {
     // 046) haven't backfilled this month yet.
     const org = data.total_organic_leads;
     const ads = data.total_ads_leads;
+    // Base report total = managed organic + managed ads (today's behavior).
+    let total;
     if (typeof org === 'number' || typeof ads === 'number') {
-      return (org ?? 0) + (ads ?? 0);
+      total = (org ?? 0) + (ads ?? 0);
+    } else {
+      total = typeof data.total_leads === 'number' ? data.total_leads : null;
     }
-    return typeof data.total_leads === 'number' ? data.total_leads : null;
+    if (total == null) return null;
+
+    // Reporting Exclusions (OS CRM client.reporting_exclusions, report-only):
+    // subtract each EXCLUDED channel's count from the real total. Subtract-only,
+    // so a client with NO exclusions returns exactly the same number as before.
+    // organic_gbp covers GBP + "listing" (= total organic minus Google-organic),
+    // matching Maggie's "listing rolls into GBP".
+    const excl = new Set(
+      String(exclusionsRaw || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+    );
+    if (excl.size) {
+      const googleOrganic = Number(data.leads_google_organic) || 0;
+      const organicTotal  = Number(org) || 0;
+      const gbpAndListing = Math.max(0, organicTotal - googleOrganic);
+      if (excl.has('organic_google')) total -= googleOrganic;
+      if (excl.has('organic_gbp'))    total -= gbpAndListing;
+      if (excl.has('ppc'))            total -= Number(data.ppc_leads) || 0;
+      if (excl.has('lsa'))            total -= Number(data.lsa_leads) || 0;
+      if (total < 0) total = 0;
+    }
+    return total;
   } catch {
     return null;
   }
@@ -110,7 +137,7 @@ async function fetchCrmClientForRecipient(sb, recipientOrName) {
   const taskId = String(recipient.clickup_task_id || '').trim();
   if (!recipientName && !taskId) return null;
   try {
-    const SELECT = 'id, name, clickup_ticket_id, website, ga4_property_id, ahrefs_project_id, client_actual_name';
+    const SELECT = 'id, name, clickup_ticket_id, website, ga4_property_id, ahrefs_project_id, client_actual_name, reporting_exclusions';
     let data = null;
     let matchedBy = null;
 
@@ -151,7 +178,7 @@ async function fetchCrmClientForRecipient(sb, recipientOrName) {
     // {{leads}} merge tag can resolve without buildMergeRow having to
     // become async. Absent data → null → renders as an empty string in
     // the email, matching how every other CRM-joined field behaves.
-    const leads = await fetchLeadsForClient(sb, data.id);
+    const leads = await fetchLeadsForClient(sb, data.id, data.reporting_exclusions);
     return { ...data, leads };
   } catch {
     return null;
