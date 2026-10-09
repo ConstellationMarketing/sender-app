@@ -135,6 +135,7 @@
       { id: 'dashboard',       label: 'Dashboard' },
       { id: 'tracking',        label: 'Tracking' },
       { id: 'reconciliation',  label: 'Reconciliation' },
+      { id: 'custom-reports',  label: 'Custom Reports' },
       { id: 'monthly-reports', label: 'Monthly Reports' },
       { id: 'newsletters',     label: 'Newsletters' },
       { id: 'client-lists',    label: 'Client Lists' },
@@ -754,6 +755,7 @@
         ${pageHeader('Client Lists', 'Auto-populated from ClickUp by account-manager assignee. Use the Rotating List to swap a client between managers.',
           `<div class="flex gap-2">
             <button class="btn btn-out" onclick="openManageLists()" title="Turn auto-sync on/off per list, add a new manager list, rename or delete lists">⚙ Manage lists</button>
+            <button class="btn btn-out" onclick="syncReportingEmails()" id="sync-email-btn" title="Pull the Reporting/Newsletter Email from the OS CRM into every client (the only address the Sender uses). Runs automatically every 4 hours too.">✉️ Sync reporting emails</button>
             <button class="btn btn-pri" onclick="syncFromClickUp()" id="sync-btn">🔄 Sync from ClickUp</button>
           </div>`)}
         <div class="grid grid-cols-1 lg:grid-cols-4 gap-4">
@@ -1043,6 +1045,21 @@
         toast('Sync failed: ' + e.message, false);
       } finally {
         if (btn) { btn.disabled = false; btn.textContent = '🔄 Sync from ClickUp'; }
+      }
+    };
+
+    window.syncReportingEmails = async () => {
+      const btn = document.getElementById('sync-email-btn');
+      if (btn) { btn.disabled = true; btn.textContent = '✉️ Syncing…'; }
+      try {
+        const r = await api('POST', '/sync-reporting-emails');
+        const c = r.counters || {};
+        toast(`Reporting emails synced from OS CRM · ${c.updated ?? 0} updated${c.cleared ? ` (${c.cleared} cleared)` : ''} · ${c.matched ?? 0} matched`);
+        refresh();
+      } catch (e) {
+        toast('Reporting-email sync failed: ' + e.message, false);
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '✉️ Sync reporting emails'; }
       }
     };
 
@@ -1961,8 +1978,8 @@
               <input id="recon-month" class="mt-1 w-full rounded-lg border border-slate-200 px-3 py-1.5 text-sm" placeholder="e.g. September 2026" />
             </div>
             <div>
-              <label class="text-[11px] uppercase tracking-wide text-ink-soft font-semibold">Custom-report clients (optional)</label>
-              <p class="text-xs text-ink-soft mt-0.5 mb-1">One firm name per line — paste from the custom-reports tracking sheet. We check these got a report too.</p>
+              <label class="text-[11px] uppercase tracking-wide text-ink-soft font-semibold">Extra custom-report clients (optional)</label>
+              <p class="text-xs text-ink-soft mt-0.5 mb-1">Your saved <button class="text-indigo-600 hover:underline" onclick="view='custom-reports';location.hash='custom-reports';renderNav();renderPage();">Custom Reports</button> list is checked automatically. Add any one-off firms here, one per line.</p>
               <textarea id="recon-custom" rows="8" class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-mono" placeholder="Firm A&#10;Firm B&#10;Firm C"></textarea>
             </div>
             <button onclick="runReconciliation()" class="rounded-lg bg-slate-900 text-white px-4 py-2 text-sm font-medium">Run reconciliation</button>
@@ -2016,6 +2033,84 @@
           <li class="p-2.5 rounded-lg hover:bg-slate-50"><div class="text-sm font-medium">${esc(n)}</div></li>`)}`;
     }
 
+    // ── Custom Reports (manage the hand-sent custom-report client list) ──
+    // The list reconciliation checks alongside the automated clients. Lives in
+    // the DB now (sender_custom_report_clients) instead of only a Google doc.
+    function renderCustomReports() {
+      setTimeout(loadCustomReports, 0);
+      return `
+        ${pageHeader('Custom Reports', 'The clients who get a hand-built custom report. Reconciliation checks these automatically.')}
+        ${card(`<div class="p-5 flex flex-wrap items-end gap-2">
+          <div class="flex-1 min-w-[180px]">
+            <label class="text-[11px] uppercase tracking-wide text-ink-soft font-semibold">Firm name</label>
+            <input id="cr-firm" class="mt-1 w-full rounded-lg border border-slate-200 px-3 py-1.5 text-sm" placeholder="e.g. Swingle Levin LLC"
+              onkeydown="if(event.key==='Enter')addCustomReport()" />
+          </div>
+          <div class="min-w-[150px]">
+            <label class="text-[11px] uppercase tracking-wide text-ink-soft font-semibold">CS owner (optional)</label>
+            <input id="cr-owner" class="mt-1 w-full rounded-lg border border-slate-200 px-3 py-1.5 text-sm" placeholder="e.g. Alejandra"
+              onkeydown="if(event.key==='Enter')addCustomReport()" />
+          </div>
+          <button onclick="addCustomReport()" class="rounded-lg bg-slate-900 text-white px-4 py-2 text-sm font-medium">Add</button>
+        </div>`, 'mb-4')}
+        <div id="cr-list" class="text-sm text-ink-muted">Loading…</div>`;
+    }
+
+    async function loadCustomReports() {
+      const el = document.getElementById('cr-list');
+      if (!el) return;
+      el.innerHTML = 'Loading…';
+      try {
+        const r = await fetch('/api/custom-reports');
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+        const list = j.clients || [];
+        el.innerHTML = list.length === 0
+          ? empty('No custom-report clients yet', 'Add the firms CS sends custom reports to. Reconciliation will check them each cycle.')
+          : card(`<table class="w-full text-sm">
+              <thead><tr class="text-left text-[11px] uppercase tracking-wide text-ink-soft border-b border-slate-100">
+                <th class="px-5 py-2.5 font-medium">Firm</th>
+                <th class="px-5 py-2.5 font-medium">CS owner</th>
+                <th class="px-5 py-2.5 font-medium text-right"></th>
+              </tr></thead><tbody>
+                ${list.map(c => `<tr class="border-b border-slate-100 last:border-0">
+                  <td class="px-5 py-3 font-medium">${esc(c.firm_name)}</td>
+                  <td class="px-5 py-3 text-ink-muted">${esc(c.cs_owner || '—')}</td>
+                  <td class="px-5 py-3 text-right"><button onclick="deleteCustomReport('${esc(c.id)}')" class="text-rose-600 hover:underline text-xs">Remove</button></td>
+                </tr>`).join('')}
+              </tbody></table>`);
+      } catch (e) {
+        el.innerHTML = `<div class="text-rose-600 text-sm">${esc(e.message)}</div>`;
+      }
+    }
+
+    async function addCustomReport() {
+      const firm = (document.getElementById('cr-firm')?.value || '').trim();
+      const owner = (document.getElementById('cr-owner')?.value || '').trim();
+      if (!firm) return;
+      try {
+        const r = await fetch('/api/custom-reports', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ firm_name: firm, cs_owner: owner }),
+        });
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+        document.getElementById('cr-firm').value = '';
+        document.getElementById('cr-owner').value = '';
+        loadCustomReports();
+      } catch (e) { alert(e.message); }
+    }
+
+    async function deleteCustomReport(id) {
+      if (!confirm('Remove this firm from the custom-report list?')) return;
+      try {
+        const r = await fetch('/api/custom-reports/' + encodeURIComponent(id), { method: 'DELETE' });
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+        loadCustomReports();
+      } catch (e) { alert(e.message); }
+    }
+
     function renderPage() {
       // upload-csv removed from the map — page no longer reachable from the
       // nav. The renderUploadCsv() function is left defined below in case
@@ -2024,6 +2119,7 @@
         'dashboard':       renderDashboard,
         'tracking':        renderTracking,
         'reconciliation':  renderReconciliation,
+        'custom-reports':  renderCustomReports,
         'newsletters':     renderNewsletters,
         'monthly-reports': renderMonthlyReports,
         'client-lists':    renderClientLists,

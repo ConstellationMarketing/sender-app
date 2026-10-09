@@ -94,3 +94,23 @@ try {
 } catch (e) {
   console.warn('[sender] assignee-sync scheduler not started:', e.message);
 }
+
+// ── Reporting-email sync ────────────────────────────────────────────────
+// Every 4 hours, mirror the OS CRM's Reporting/Newsletter Email into the
+// Sender's recipients so the send-to list always reflects the one source of
+// truth. Users can also trigger it on demand (Client Lists → Sync reporting
+// emails → POST /api/sync-reporting-emails).
+try {
+  const { syncReportingEmails } = require('./lib/reporting-email-sync');
+  const EMAIL_SYNC_MS = 4 * 60 * 60 * 1000;
+  const tick = () => {
+    syncReportingEmails()
+      .then(r => console.log('[sender] reporting-email-sync ok:', JSON.stringify(r.counters)))
+      .catch(err => console.error('[sender] reporting-email-sync failed:', err.message));
+  };
+  setTimeout(tick, 45 * 1000);   // once shortly after boot
+  setInterval(tick, EMAIL_SYNC_MS);
+  console.log(`[sender] reporting-email-sync scheduled every ${EMAIL_SYNC_MS / 3600000}h`);
+} catch (e) {
+  console.warn('[sender] reporting-email-sync scheduler not started:', e.message);
+}
