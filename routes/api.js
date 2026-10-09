@@ -389,9 +389,24 @@ router.post('/reconciliation', wrap(async (req, res) => {
     return `${monthNames[prev.getMonth()]} ${prev.getFullYear()}`;
   })();
   const month = (body.month && String(body.month)) || defaultMonth;
-  const customNames = Array.isArray(body.customNames)
+
+  // Custom-report clients: the saved roster (managed in the Custom Reports
+  // tab) PLUS any one-off names pasted into the box this run. Union, de-duped.
+  const pasted = Array.isArray(body.customNames)
     ? body.customNames.map(s => String(s || '').trim()).filter(Boolean)
     : [];
+  const { data: storedCustom } = await sb
+    .from('sender_custom_report_clients')
+    .select('firm_name')
+    .eq('active', true);
+  const stored = (storedCustom || []).map(c => String(c.firm_name || '').trim()).filter(Boolean);
+  const seenC = new Set();
+  const customNames = [...stored, ...pasted].filter(n => {
+    const k = n.toLowerCase();
+    if (seenC.has(k)) return false;
+    seenC.add(k);
+    return true;
+  });
 
   const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
@@ -441,6 +456,54 @@ router.post('/reconciliation', wrap(async (req, res) => {
     automated: { expected: active.length, missed: autoMissed, missed_count: autoMissed.length },
     custom:    { expected: customNames.length, missed: customMissed, missed_count: customMissed.length },
   });
+}));
+
+// ─── Custom-report client roster (CRUD for the Custom Reports tab) ──────────
+// The list of clients that get a hand-built custom report. Managed in the UI
+// so it no longer lives only in a Google doc; reconciliation reads it above.
+router.get('/custom-reports', wrap(async (_req, res) => {
+  const sb = getSupabase();
+  const { data, error } = await sb
+    .from('sender_custom_report_clients')
+    .select('id, firm_name, cs_owner, active, created_at')
+    .order('firm_name');
+  if (error) return bad(res, 500, error.message);
+  res.json({ ok: true, clients: data || [] });
+}));
+
+router.post('/custom-reports', wrap(async (req, res) => {
+  const sb = getSupabase();
+  const firm_name = String((req.body && req.body.firm_name) || '').trim();
+  const cs_owner  = String((req.body && req.body.cs_owner) || '').trim() || null;
+  if (!firm_name) return bad(res, 400, 'firm_name is required');
+  const { data, error } = await sb
+    .from('sender_custom_report_clients')
+    .insert({ firm_name, cs_owner })
+    .select()
+    .single();
+  if (error) {
+    // Duplicate firm (unique index on lower(firm_name)).
+    if (/duplicate|unique/i.test(error.message)) return bad(res, 409, `"${firm_name}" is already on the custom-report list`);
+    return bad(res, 400, error.message);
+  }
+  res.json({ ok: true, client: data });
+}));
+
+router.delete('/custom-reports/:id', wrap(async (req, res) => {
+  const sb = getSupabase();
+  const id = req.params.id;
+  const { error } = await sb.from('sender_custom_report_clients').delete().eq('id', id);
+  if (error) return bad(res, 400, error.message);
+  res.json({ ok: true });
+}));
+
+// ─── Manual reporting-email sync (OS CRM → Sender) ──────────────────────────
+// Pulls public.client.reporting_email into the recipients. Also runs every 4h
+// (server.js). The "Sync reporting emails" button in Client Lists calls this.
+router.post('/sync-reporting-emails', wrap(async (_req, res) => {
+  const { syncReportingEmails } = require('../lib/reporting-email-sync');
+  const r = await syncReportingEmails();
+  res.json({ ok: true, ...r });
 }));
 
 // ─── Snapshot (one-shot read for the UI) ───────────────────────────────────
