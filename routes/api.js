@@ -485,17 +485,45 @@ router.post('/reconciliation', wrap(async (req, res) => {
   });
 }));
 
+// Normalize 'YYYY-MM' (or 'YYYY-MM-DD') to a 'YYYY-MM-01' date string; falls
+// back to the current month. Used by the custom-report "sent" tracking.
+function normalizeCycleMonth(raw) {
+  const m = String(raw || '').match(/^(\d{4})-(\d{2})/);
+  if (m) return `${m[1]}-${m[2]}-01`;
+  const d = new Date();
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-01`;
+}
+
 // ─── Custom-report client roster (CRUD for the Custom Reports tab) ──────────
 // The list of clients that get a hand-built custom report. Managed in the UI
 // so it no longer lives only in a Google doc; reconciliation reads it above.
-router.get('/custom-reports', wrap(async (_req, res) => {
+router.get('/custom-reports', wrap(async (req, res) => {
   const sb = getSupabase();
+  const month = normalizeCycleMonth(req.query.month);
   const { data, error } = await sb
     .from('sender_custom_report_clients')
     .select('id, firm_name, cs_owner, active, created_at')
     .order('firm_name');
   if (error) return bad(res, 500, error.message);
-  res.json({ ok: true, clients: data || [] });
+  const clients = data || [];
+
+  // Attach the per-cycle "sent" status (the manual checkmark) for `month`.
+  const ids = clients.map(c => c.id);
+  const sentByClient = {};
+  if (ids.length) {
+    const { data: sends, error: sErr } = await sb
+      .from('sender_custom_report_sends')
+      .select('client_id, sent, sent_at, sent_by')
+      .eq('cycle_month', month)
+      .in('client_id', ids);
+    if (sErr) return bad(res, 500, sErr.message);
+    for (const s of sends || []) sentByClient[s.client_id] = s;
+  }
+  const withSent = clients.map(c => {
+    const s = sentByClient[c.id];
+    return { ...c, sent: !!(s && s.sent), sent_at: (s && s.sent_at) || null, sent_by: (s && s.sent_by) || null };
+  });
+  res.json({ ok: true, month, clients: withSent });
 }));
 
 router.post('/custom-reports', wrap(async (req, res) => {
@@ -522,6 +550,34 @@ router.delete('/custom-reports/:id', wrap(async (req, res) => {
   const { error } = await sb.from('sender_custom_report_clients').delete().eq('id', id);
   if (error) return bad(res, 400, error.message);
   res.json({ ok: true });
+}));
+
+// PUT /api/custom-reports/:id/sent  { month, sent, by? } — toggle the per-cycle
+// "sent" checkmark for a custom-report client. Custom reports are sent BY HAND,
+// so this is a manual flag (replaces the Google doc "Sent" column). Upserts one
+// row per (client, cycle_month) into sender_custom_report_sends.
+router.put('/custom-reports/:id/sent', wrap(async (req, res) => {
+  const sb = getSupabase();
+  const client_id = Number(req.params.id);
+  if (!Number.isFinite(client_id)) return bad(res, 400, 'Invalid client id');
+  const month = normalizeCycleMonth(req.body && req.body.month);
+  const sent = !(req.body && req.body.sent === false);
+  const by = String((req.body && req.body.by) || '').trim() || null;
+  const payload = {
+    client_id,
+    cycle_month: month,
+    sent,
+    sent_at: sent ? new Date().toISOString() : null,
+    sent_by: sent ? by : null,
+    updated_at: new Date().toISOString(),
+  };
+  const { data, error } = await sb
+    .from('sender_custom_report_sends')
+    .upsert(payload, { onConflict: 'client_id,cycle_month' })
+    .select()
+    .single();
+  if (error) return bad(res, 400, error.message);
+  res.json({ ok: true, send: data });
 }));
 
 // ─── Manual reporting-email sync (OS CRM → Sender) ──────────────────────────

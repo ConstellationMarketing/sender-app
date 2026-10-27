@@ -2060,13 +2060,17 @@
           <li class="p-2.5 rounded-lg hover:bg-slate-50"><div class="text-sm font-medium">${esc(n)}</div></li>`)}`;
     }
 
+    // Selected cycle month for the custom-report "sent" tracking (YYYY-MM).
+    let crMonth = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; })();
+
     // ── Custom Reports (manage the hand-sent custom-report client list) ──
     // The list reconciliation checks alongside the automated clients. Lives in
     // the DB now (sender_custom_report_clients) instead of only a Google doc.
     function renderCustomReports() {
       setTimeout(loadCustomReports, 0);
       return `
-        ${pageHeader('Custom Reports', 'The clients who get a hand-built custom report. Reconciliation checks these automatically.')}
+        ${pageHeader('Custom Reports', 'Hand-built reports CS sends manually. Check each one off as you send it. Reconciliation also uses this list.',
+          `<div class="flex items-center gap-2 text-sm"><span class="text-ink-muted">Cycle month</span><input type="month" id="cr-month" value="${esc(crMonth)}" onchange="crMonth=this.value;loadCustomReports()" class="rounded-lg border border-slate-200 px-2 py-1 text-sm" /></div>`)}
         ${card(`<div class="p-5 flex flex-wrap items-end gap-2">
           <div class="flex-1 min-w-[180px]">
             <label class="text-[11px] uppercase tracking-wide text-ink-soft font-semibold">Firm name</label>
@@ -2088,21 +2092,26 @@
       if (!el) return;
       el.innerHTML = 'Loading…';
       try {
-        const r = await fetch('/api/custom-reports');
+        const r = await fetch('/api/custom-reports?month=' + encodeURIComponent(crMonth));
         const j = await r.json();
         if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
         const list = j.clients || [];
+        const sentCount = list.filter(c => c.sent).length;
         el.innerHTML = list.length === 0
-          ? empty('No custom-report clients yet', 'Add the firms CS sends custom reports to. Reconciliation will check them each cycle.')
-          : card(`<table class="w-full text-sm">
+          ? empty('No custom-report clients yet', 'Add the firms CS sends custom reports to, then check each one off as you send it.')
+          : `<div class="mb-2 text-xs text-ink-soft">${sentCount} of ${list.length} sent this cycle</div>` + card(`<table class="w-full text-sm">
               <thead><tr class="text-left text-[11px] uppercase tracking-wide text-ink-soft border-b border-slate-100">
+                <th class="px-5 py-2.5 font-medium">Sent</th>
                 <th class="px-5 py-2.5 font-medium">Firm</th>
                 <th class="px-5 py-2.5 font-medium">CS owner</th>
+                <th class="px-5 py-2.5 font-medium">Marked</th>
                 <th class="px-5 py-2.5 font-medium text-right"></th>
               </tr></thead><tbody>
-                ${list.map(c => `<tr class="border-b border-slate-100 last:border-0">
+                ${list.map(c => `<tr class="border-b border-slate-100 last:border-0 ${c.sent ? 'bg-emerald-50/40' : ''}">
+                  <td class="px-5 py-3"><input type="checkbox" ${c.sent ? 'checked' : ''} onchange="toggleCustomReportSent('${esc(c.id)}', this.checked)" class="h-4 w-4 cursor-pointer align-middle" /></td>
                   <td class="px-5 py-3 font-medium">${esc(c.firm_name)}</td>
                   <td class="px-5 py-3 text-ink-muted">${esc(c.cs_owner || '—')}</td>
+                  <td class="px-5 py-3 text-ink-soft">${c.sent && c.sent_at ? esc(relTime(c.sent_at)) : '—'}</td>
                   <td class="px-5 py-3 text-right"><button onclick="deleteCustomReport('${esc(c.id)}')" class="text-rose-600 hover:underline text-xs">Remove</button></td>
                 </tr>`).join('')}
               </tbody></table>`);
@@ -2136,6 +2145,18 @@
         if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
         loadCustomReports();
       } catch (e) { alert(e.message); }
+    }
+
+    async function toggleCustomReportSent(id, sent) {
+      try {
+        const r = await fetch('/api/custom-reports/' + encodeURIComponent(id) + '/sent', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ month: crMonth, sent }),
+        });
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+        loadCustomReports();
+      } catch (e) { alert(e.message); loadCustomReports(); }
     }
 
     function renderPage() {
