@@ -486,11 +486,7 @@
           // At least one must be filled; the backend send loop honors
           // ad_hoc_recipients first if present, otherwise uses the list.
           { name: 'audience_list_id', label: 'Audience list', type: 'select', value: existing?.audience_list_id,
-            options: [{ value: '', label: '— pick a list (or leave blank and type recipients below) —' }, ...audienceLists.map(l => ({ value: l.id, label: l.name }))] },
-          { name: 'ad_hoc_recipients', label: 'Or type recipients (for testing)', type: 'textarea', rows: 3,
-            value: existing?.ad_hoc_recipients || '',
-            placeholder: 'omar@goconstellation.com, luiza@goconstellation.com',
-            hint: 'Comma, space, or newline separated. Leave blank if you picked a list above.' },
+            options: [{ value: '', label: '— pick an audience list —' }, ...audienceLists.map(l => ({ value: l.id, label: l.name }))] },
           { name: 'template_id', label: 'Template', type: 'select', required: true, value: existing?.template_id,
             options: [{ value: '', label: '— pick a template —' }, ...templates.map(t => ({ value: t.id, label: t.name }))] },
           // Schedule input is ET wall-clock. When set, the batch is saved
@@ -503,16 +499,21 @@
             hint: 'Time is Eastern Time (ET, i.e. EST/EDT). The batch will auto-send within ~1 min of this time. Leave blank if you\'ll click Send immediately yourself.' },
         ],
         onSubmit: async (form) => {
-          const adHoc = String(form.ad_hoc_recipients || '').trim();
-          if (!form.audience_list_id && !adHoc) {
-            throw new Error('Pick an audience list or type at least one recipient email.');
+          if (!form.audience_list_id) {
+            throw new Error('Pick an audience list.');
           }
           const payload = {
             name: form.name,
             type,
             owner: form.owner || null,
             audience_list_id: form.audience_list_id || null,
-            ad_hoc_recipients: adHoc || null,
+            // The "type recipients (for testing)" field was removed — it
+            // silently overrode the audience list and caused reports to
+            // go to a single address (e.g. a report showing "1 recipient").
+            // Use the "Test" button for test sends instead. We null it on
+            // every save so any stray value left on an existing report is
+            // cleared and the audience list is always used.
+            ad_hoc_recipients: null,
             template_id: form.template_id || null,
             scheduled_at: etLocalToUtc(form.scheduled_at),
             status: form.scheduled_at ? 'scheduled' : 'draft',
